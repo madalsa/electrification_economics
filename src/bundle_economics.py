@@ -5,11 +5,25 @@ For each representative building x rate x bundle, compute:
   - optimal (pv_kw, batt_kwh) sized to the EXPANDED load (when bundle
     contains pv_bat), so the PV-EV / PV-HP synergy is captured rather
     than just additively combining standalone NPVs
-  - total capex after stacked rebates
-  - annual savings (PV self-cons + battery arbitrage + EV fuel saving
-    + HP gas saving - HP electric cost increase)
-  - 20-yr NPV (with inverter replacement at year 13 if PV present) and
-    simple payback
+  - capex DECOMPOSED into pv_bat / ev / hp pieces (each net of stacked
+    rebates) so the parquet answers "how much of NPV is capex vs. fuel"
+  - annual savings DECOMPOSED into:
+      bill_savings_pv_bat   (rate-dependent)
+      gasoline_avoided       (rate-INDEPENDENT, ~= vmt/mpg * gas_price)
+      ev_charging_cost       (rate-dependent, EV load * eff_kwh_price)
+      gas_avoided_value      (rate-INDEPENDENT, therms * therm_price)
+      hp_elec_increase       (rate-dependent, HP load * rate price)
+  - 20-yr NPV per component (npv_pv_bat, npv_ev, npv_hp) and total
+
+Decomposition matters because:
+  - The "rate-dependent" pieces vary across the 6 rate scenarios; the
+    "rate-independent" pieces don't. Their spread tells you what share of
+    NPV is rate-design-sensitive vs. fuel-price-driven.
+  - gasoline_avoided is linear in gas_price; gas_avoided_value is linear
+    in therm_price. Fuel-price elasticity can be computed post-hoc by
+    scaling those two columns - no re-run needed (see decompose.py).
+  - Capex pieces are rate-independent. The capex/NPV ratio per bundle
+    isolates how much rate design can do at all.
 
 Bundles considered (composable):
     none           - do-nothing baseline (reference)
@@ -21,18 +35,13 @@ Bundles considered (composable):
     ev_hp          - EV + HP (no solar)
     pv_bat_ev_hp   - full residential electrification
 
-This module reuses:
-  - sizing_optimizer.evaluate_size for PV/battery dispatch heuristic
-  - vmt_sensitivity.CHARGING_PROFILES + hourly_to_tou_weights for EV load
-  - upgrade11_economics.project_upgrade11_annual / _avg_*_price for HP
-  - payback_npv.apply_capex_stack / npv / simple_payback
-
 Outputs:
     data/bundle_economics_<utility>.parquet  (one row per bldg x rate x bundle)
     data/bundle_summary.csv                  (median / weighted-mean by rate x bundle)
 
 Feeds paper figures 6 (HP bundle payback by rate, with/without PV+storage)
-and 7 (optimal-rate-per-customer at zero NPV).
+and 7 (optimal-rate-per-customer at zero NPV), plus the
+subsidy-vs-rate-design decomposition figure.
 """
 
 from __future__ import annotations
@@ -178,23 +187,39 @@ def grid_search_pv_bat(
     return best_pv, best_batt, best_save, best_capex, best_npv
 
 
-def ev_component_savings(
+def ev_component_decomposed(
     rate_row: pd.Series, utility: str,
     vmt: float, ev_eff: float, ice_mpg: float, gas_price: float,
     profile: str = "smart_tou",
-) -> float:
+) -> tuple[float, float]:
+    """Return (gasoline_avoided, ev_charging_cost) at year-1 real dollars.
+
+    gasoline_avoided  = vmt / mpg * gas_price          (rate-INDEPENDENT)
+    ev_charging_cost  = vmt / ev_eff * eff_kwh_price   (rate-DEPENDENT)
+
+    Net EV operating savings = gasoline_avoided - ev_charging_cost.
+    """
+    gasoline_avoided = (vmt / ice_mpg) * gas_price
     eff_kwh = vs.effective_kwh_price(rate_row, profile, utility)
     if np.isnan(eff_kwh):
-        return 0.0
-    return p.ev_annual_fuel_savings(
-        vmt=vmt, gas_price=gas_price, ice_mpg=ice_mpg,
-        ev_eff_mi_per_kwh=ev_eff, rate_effective_per_kwh=eff_kwh)
+        return gasoline_avoided, 0.0
+    ev_charging_cost = (vmt / ev_eff) * eff_kwh
+    return gasoline_avoided, ev_charging_cost
 
 
-def hp_component_capex_savings(
+def hp_component_decomposed(
     bldg: pd.Series, rate_row: pd.Series, utility: str
-) -> tuple[float, float]:
-    """HP-bundle net capex (after stacked rebates) + annual savings."""
+) -> tuple[float, float, float]:
+    """Return (capex_hp_net, gas_avoided_value, hp_elec_increase).
+
+    capex_hp_net       = HP + HPWH + induction + panel after stacked rebates
+    gas_avoided_value  = therms_displaced * therm_price   (rate-INDEPENDENT)
+    hp_elec_increase   = delta_kwh * rate-effective price (rate-DEPENDENT,
+                         winter price for space heat, year-round for HPWH
+                         and induction)
+
+    Net HP operating savings = gas_avoided_value - hp_elec_increase.
+    """
     ami_frac = bldg.get("ami_frac")
     if ami_frac is None or pd.isna(ami_frac):
         ami_frac = 1.0
@@ -207,18 +232,50 @@ def hp_component_capex_savings(
     heat_price = u11._avg_winter_price(rate_row)
     yearround = u11._avg_yearround_price(rate_row)
     if np.isnan(heat_price) or np.isnan(yearround):
-        return net_capex, 0.0
+        return net_capex, 0.0, 0.0
     elec_increase = (
         bldg["delta_kwh_hp_space"] * heat_price
         + bldg["delta_kwh_hpwh"] * yearround
         + bldg["delta_kwh_induction"] * yearround)
-    gas_savings = bldg["total_therms_displaced"] * config.gas_price(utility)
-    return net_capex, gas_savings - elec_increase
+    gas_avoided_value = (bldg["total_therms_displaced"]
+                         * config.gas_price(utility))
+    return net_capex, gas_avoided_value, elec_increase
+
+
+def component_npv(annual_savings: float, capex: float,
+                  has_inverter_replacement: bool = False) -> float:
+    """20-yr NPV of one decomposed cashflow stream, real $.
+
+    Inverter replacement only attaches to the pv_bat sub-stream (it makes
+    no sense to charge it against EV or HP NPVs).
+    """
+    cashflows = p.annual_cashflow_series(
+        annual_savings,
+        midlife_replacement_year=(config.INVERTER_REPLACEMENT_YEAR
+                                  if has_inverter_replacement else None),
+        midlife_replacement_cost=(config.INVERTER_REPLACEMENT_COST
+                                  if has_inverter_replacement else 0))
+    return p.npv(cashflows, capex=capex)
 
 
 # -----------------------------------------------------------------------------
 # Single-bundle evaluation
 # -----------------------------------------------------------------------------
+
+_DECOMPOSED_ZERO = {
+    "capex_pv_bat":         0.0,
+    "capex_ev":             0.0,
+    "capex_hp":             0.0,
+    "bill_savings_pv_bat":  0.0,
+    "gasoline_avoided":     0.0,
+    "ev_charging_cost":     0.0,
+    "gas_avoided_value":    0.0,
+    "hp_elec_increase":     0.0,
+    "npv_pv_bat":           0.0,
+    "npv_ev":               0.0,
+    "npv_hp":               0.0,
+}
+
 
 def evaluate_bundle(
     bundle: str,
@@ -235,14 +292,17 @@ def evaluate_bundle(
     air_district: str,
     tou_weights: dict[str, float],
 ) -> dict:
-    """Return the bundle's economic columns for one (bldg, rate) cell."""
+    """Return the bundle's decomposed economic columns for one (bldg, rate)."""
     has_pv_bat, has_ev, has_hp = parse_bundle(bundle)
 
     if bundle == "none":
         return {
             "bundle": bundle, "pv_kw": 0.0, "batt_kwh": 0.0,
-            "capex_total": 0.0, "annual_savings": 0.0,
-            "npv": 0.0, "simple_payback_yrs": float("inf"),
+            **_DECOMPOSED_ZERO,
+            "capex_total": 0.0,
+            "annual_savings": 0.0,
+            "npv": 0.0,
+            "simple_payback_yrs": float("inf"),
         }
 
     ev_load = (ev_kwh_by_tou(utility, ev_params["vmt"], ev_params["ev_eff"])
@@ -254,44 +314,62 @@ def evaluate_bundle(
     load = expanded_load_by_tou(baseline_load_by_tou, ev_load, hp_load)
 
     pv_kw = batt_kwh = 0.0
-    capex_total = 0.0
-    annual_savings = 0.0
+    capex_pv_bat = bill_savings_pv_bat = npv_pv_bat = 0.0
+    capex_ev = gasoline_avoided = ev_charging_cost = npv_ev = 0.0
+    capex_hp = gas_avoided_value = hp_elec_increase = npv_hp = 0.0
 
     if has_pv_bat:
-        pv_kw, batt_kwh, ann_save_pv, capex_pv, _ = grid_search_pv_bat(
-            load, prices, eec, fixed_monthly, demand_charge, avg_peak_kw)
-        capex_total += capex_pv
-        annual_savings += ann_save_pv
+        pv_kw, batt_kwh, bill_savings_pv_bat, capex_pv_bat, _ = (
+            grid_search_pv_bat(
+                load, prices, eec, fixed_monthly,
+                demand_charge, avg_peak_kw))
+        npv_pv_bat = component_npv(
+            bill_savings_pv_bat, capex_pv_bat,
+            has_inverter_replacement=(pv_kw > 0))
 
     if has_ev:
-        ev_premium = p.ev_net_premium(
-            ev_params["scenario"], air_district=air_district)
-        capex_total += max(ev_premium, 0)
-        annual_savings += ev_component_savings(
+        capex_ev = max(p.ev_net_premium(
+            ev_params["scenario"], air_district=air_district), 0)
+        gasoline_avoided, ev_charging_cost = ev_component_decomposed(
             rate_row, utility,
             ev_params["vmt"], ev_params["ev_eff"],
             ev_params["ice_mpg"], ev_params["gas_price"])
+        npv_ev = component_npv(
+            gasoline_avoided - ev_charging_cost, capex_ev)
 
     if has_hp:
-        hp_capex, hp_savings = hp_component_capex_savings(
-            bldg, rate_row, utility)
-        capex_total += hp_capex
-        annual_savings += hp_savings
+        capex_hp, gas_avoided_value, hp_elec_increase = (
+            hp_component_decomposed(bldg, rate_row, utility))
+        npv_hp = component_npv(
+            gas_avoided_value - hp_elec_increase, capex_hp)
 
-    midlife_yr = (config.INVERTER_REPLACEMENT_YEAR
-                  if has_pv_bat and pv_kw > 0 else None)
-    midlife_cost = (config.INVERTER_REPLACEMENT_COST
-                    if has_pv_bat and pv_kw > 0 else 0)
-    cashflows = p.annual_cashflow_series(
-        annual_savings,
-        midlife_replacement_year=midlife_yr,
-        midlife_replacement_cost=midlife_cost)
-    npv = p.npv(cashflows, capex=capex_total)
+    capex_total = capex_pv_bat + capex_ev + capex_hp
+    annual_savings = (bill_savings_pv_bat
+                      + gasoline_avoided - ev_charging_cost
+                      + gas_avoided_value - hp_elec_increase)
+    npv_total = npv_pv_bat + npv_ev + npv_hp
     payback = p.simple_payback(capex_total, max(annual_savings, 0))
+
     return {
         "bundle": bundle, "pv_kw": pv_kw, "batt_kwh": batt_kwh,
-        "capex_total": capex_total, "annual_savings": annual_savings,
-        "npv": npv, "simple_payback_yrs": payback,
+        # capex decomposition (net of stacked rebates, $ at year 0)
+        "capex_pv_bat": capex_pv_bat,
+        "capex_ev":     capex_ev,
+        "capex_hp":     capex_hp,
+        "capex_total":  capex_total,
+        # annual savings decomposition (year-1 real $)
+        "bill_savings_pv_bat": bill_savings_pv_bat,   # rate-DEP
+        "gasoline_avoided":    gasoline_avoided,       # rate-INDEP
+        "ev_charging_cost":    ev_charging_cost,       # rate-DEP
+        "gas_avoided_value":   gas_avoided_value,      # rate-INDEP
+        "hp_elec_increase":    hp_elec_increase,       # rate-DEP
+        "annual_savings":      annual_savings,
+        # NPV decomposition (20-yr real, components sum to npv)
+        "npv_pv_bat": npv_pv_bat,
+        "npv_ev":     npv_ev,
+        "npv_hp":     npv_hp,
+        "npv":        npv_total,
+        "simple_payback_yrs": payback,
     }
 
 
@@ -357,20 +435,32 @@ def build_bundles_for_utility(
 
 
 def summarize(df: pd.DataFrame, utility: str) -> pd.DataFrame:
-    """Median + cluster-weighted-mean NPV per (bundle, rate)."""
-    def wmean(sub: pd.DataFrame) -> float:
-        w = sub["cluster_weight"].astype(float).values
+    """Median + cluster-weighted-mean NPV per (bundle, rate), with the
+    NPV decomposition components retained as separate medians."""
+    def wmean(values: np.ndarray, w: np.ndarray) -> float:
         if w.sum() <= 0:
             return float("nan")
-        return float(np.average(sub["npv"].values, weights=w))
+        return float(np.average(values, weights=w))
 
     grouped = df.groupby(["bundle", "rate_id"])
     s = grouped.agg(
         median_npv=("npv", "median"),
+        median_npv_pv_bat=("npv_pv_bat", "median"),
+        median_npv_ev=("npv_ev", "median"),
+        median_npv_hp=("npv_hp", "median"),
+        median_gasoline_avoided=("gasoline_avoided", "median"),
+        median_gas_avoided_value=("gas_avoided_value", "median"),
+        median_capex_total=("capex_total", "median"),
         median_payback=("simple_payback_yrs", "median"),
-        n=("npv", "size")).reset_index()
-    s["weighted_npv"] = [wmean(df[(df["bundle"] == b) & (df["rate_id"] == r)])
-                         for b, r in zip(s["bundle"], s["rate_id"])]
+        n=("npv", "size"),
+    ).reset_index()
+
+    weighted = []
+    for b, r in zip(s["bundle"], s["rate_id"]):
+        sub = df[(df["bundle"] == b) & (df["rate_id"] == r)]
+        w = sub["cluster_weight"].astype(float).values
+        weighted.append(wmean(sub["npv"].values, w))
+    s["weighted_npv"] = weighted
     s["utility"] = utility
     return s
 

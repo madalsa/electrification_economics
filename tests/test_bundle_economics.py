@@ -167,6 +167,13 @@ def test_none_bundle_yields_zero_npv():
     assert rec["capex_total"] == 0.0
     assert rec["pv_kw"] == 0.0
     assert rec["batt_kwh"] == 0.0
+    # decomposition columns must all be zero too
+    for col in ("npv_pv_bat", "npv_ev", "npv_hp",
+                "capex_pv_bat", "capex_ev", "capex_hp",
+                "gasoline_avoided", "gas_avoided_value",
+                "ev_charging_cost", "hp_elec_increase",
+                "bill_savings_pv_bat"):
+        assert rec[col] == 0.0, col
 
 
 def test_pv_bat_bundle_has_positive_capex_after_rebates():
@@ -223,6 +230,132 @@ def test_hp_only_capex_matches_payback_npv_stack():
     ctx = p.IncentiveContext(income_pct_ami=1.5)
     expected_capex, _ = p.apply_capex_stack(capex, ctx)
     assert approx(rec["capex_total"], expected_capex)
+
+
+def test_npv_components_sum_to_total():
+    """npv_pv_bat + npv_ev + npv_hp must equal npv (within float tol)."""
+    bldg = _make_test_building()
+    rate = _make_test_rate()
+    tou_w, prices, ev_params = _common_eval_args()
+    baseline = {k: bldg["annual_kwh"] * (w / sum(tou_w.values()))
+                for k, w in tou_w.items()}
+    for bundle in be.BUNDLES:
+        rec = be.evaluate_bundle(
+            bundle, bldg, rate, "pge",
+            baseline, prices, 0.09, 15.0, 0.0, 5.0,
+            ev_params, "BAAQMD", tou_w)
+        total = rec["npv_pv_bat"] + rec["npv_ev"] + rec["npv_hp"]
+        assert approx(total, rec["npv"], tol=1e-6), bundle
+
+
+def test_capex_components_sum_to_total():
+    bldg = _make_test_building()
+    rate = _make_test_rate()
+    tou_w, prices, ev_params = _common_eval_args()
+    baseline = {k: bldg["annual_kwh"] * (w / sum(tou_w.values()))
+                for k, w in tou_w.items()}
+    for bundle in be.BUNDLES:
+        rec = be.evaluate_bundle(
+            bundle, bldg, rate, "pge",
+            baseline, prices, 0.09, 15.0, 0.0, 5.0,
+            ev_params, "BAAQMD", tou_w)
+        total = rec["capex_pv_bat"] + rec["capex_ev"] + rec["capex_hp"]
+        assert approx(total, rec["capex_total"], tol=1e-6), bundle
+
+
+def test_annual_savings_components_sum_to_total():
+    bldg = _make_test_building()
+    rate = _make_test_rate()
+    tou_w, prices, ev_params = _common_eval_args()
+    baseline = {k: bldg["annual_kwh"] * (w / sum(tou_w.values()))
+                for k, w in tou_w.items()}
+    for bundle in be.BUNDLES:
+        rec = be.evaluate_bundle(
+            bundle, bldg, rate, "pge",
+            baseline, prices, 0.09, 15.0, 0.0, 5.0,
+            ev_params, "BAAQMD", tou_w)
+        total = (rec["bill_savings_pv_bat"]
+                 + rec["gasoline_avoided"] - rec["ev_charging_cost"]
+                 + rec["gas_avoided_value"] - rec["hp_elec_increase"])
+        assert approx(total, rec["annual_savings"], tol=1e-6), bundle
+
+
+def test_gasoline_avoided_is_rate_independent():
+    """For an EV-only bundle, gasoline_avoided should not depend on rate."""
+    bldg = _make_test_building()
+    tou_w, _, ev_params = _common_eval_args()
+    baseline = {k: bldg["annual_kwh"] * (w / sum(tou_w.values()))
+                for k, w in tou_w.items()}
+    rate_hi = _make_test_rate()
+    rate_lo = _make_test_rate()
+    rate_lo["summer_peak"] = 0.20
+    rate_lo["summer_offpeak"] = 0.10
+    rate_lo["winter_peak"] = 0.18
+    rate_lo["winter_offpeak"] = 0.10
+    prices_hi = {"summer_peak": 0.55, "summer_offpeak": 0.30,
+                 "winter_peak": 0.45, "winter_offpeak": 0.28}
+    prices_lo = {"summer_peak": 0.20, "summer_offpeak": 0.10,
+                 "winter_peak": 0.18, "winter_offpeak": 0.10}
+    rec_hi = be.evaluate_bundle("ev", bldg, rate_hi, "pge",
+                                baseline, prices_hi, 0.09, 15.0, 0.0, 5.0,
+                                ev_params, "BAAQMD", tou_w)
+    rec_lo = be.evaluate_bundle("ev", bldg, rate_lo, "pge",
+                                baseline, prices_lo, 0.09, 15.0, 0.0, 5.0,
+                                ev_params, "BAAQMD", tou_w)
+    assert approx(rec_hi["gasoline_avoided"], rec_lo["gasoline_avoided"])
+    # But ev_charging_cost DOES change with rate
+    assert rec_hi["ev_charging_cost"] > rec_lo["ev_charging_cost"]
+
+
+def test_gas_avoided_is_rate_independent():
+    """For an HP-only bundle, gas_avoided_value should not depend on rate."""
+    bldg = _make_test_building()
+    tou_w, _, ev_params = _common_eval_args()
+    baseline = {k: bldg["annual_kwh"] * (w / sum(tou_w.values()))
+                for k, w in tou_w.items()}
+    rate_hi = _make_test_rate()
+    rate_lo = _make_test_rate()
+    rate_lo["winter_peak"] = 0.18
+    rate_lo["winter_offpeak"] = 0.10
+    rate_lo["summer_peak"] = 0.20
+    rate_lo["summer_offpeak"] = 0.10
+    prices_hi = {"summer_peak": 0.55, "summer_offpeak": 0.30,
+                 "winter_peak": 0.45, "winter_offpeak": 0.28}
+    prices_lo = {"summer_peak": 0.20, "summer_offpeak": 0.10,
+                 "winter_peak": 0.18, "winter_offpeak": 0.10}
+    rec_hi = be.evaluate_bundle("hp", bldg, rate_hi, "pge",
+                                baseline, prices_hi, 0.09, 15.0, 0.0, 5.0,
+                                ev_params, "BAAQMD", tou_w)
+    rec_lo = be.evaluate_bundle("hp", bldg, rate_lo, "pge",
+                                baseline, prices_lo, 0.09, 15.0, 0.0, 5.0,
+                                ev_params, "BAAQMD", tou_w)
+    assert approx(rec_hi["gas_avoided_value"], rec_lo["gas_avoided_value"])
+    # But hp_elec_increase DOES change with rate
+    assert rec_hi["hp_elec_increase"] > rec_lo["hp_elec_increase"]
+
+
+def test_fuel_price_linearity_via_decompose():
+    """Decompose helper: scaling gas_price by k scales gasoline_avoided
+    by k, with no other column changing."""
+    from src import decompose as dc
+    df = pd.DataFrame({
+        "bundle": ["ev"] * 3,
+        "npv":              [0.0, 0.0, 0.0],
+        "gasoline_avoided": [1500.0, 1500.0, 1500.0],
+        "gas_avoided_value":[0.0, 0.0, 0.0],
+        "ev_charging_cost": [800.0, 800.0, 800.0],
+        "hp_elec_increase": [0.0, 0.0, 0.0],
+        "bill_savings_pv_bat": [0.0, 0.0, 0.0],
+        "capex_total": [5000.0, 5000.0, 5000.0],
+    })
+    out = dc.fuel_price_elasticity(
+        df, gas_prices=[4.90, 9.80], therm_prices=[2.40],
+        base_gas_price=4.90, base_therm_price=2.40)
+    base = out[(out["gas_price"] == 4.90)]["median_npv"].iloc[0]
+    doubled = out[(out["gas_price"] == 9.80)]["median_npv"].iloc[0]
+    # Doubling gas price adds (1500 * 1.0 * npv_factor) to NPV
+    f = dc.npv_factor()
+    assert approx(doubled - base, 1500.0 * f, tol=1e-6)
 
 
 def test_artifact_runnable_when_present():
