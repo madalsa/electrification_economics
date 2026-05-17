@@ -142,7 +142,17 @@ def apply_scope_filter(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Create feature columns for clustering."""
+    """Create feature columns for clustering.
+
+    Includes load-SHAPE features (not just volume), since rate-design
+    sensitivity is driven by *when* a household uses electricity:
+      - cooling_share / hvac_share / hot_water_share / plug_loads_share:
+        end-use composition is a strong proxy for TOU shape (cooling
+        peaks midday, plug loads evening, hot water morning/evening)
+      - peakiness_summer / peakiness_winter: peak kW divided by mean kW;
+        captures spiky vs. flat load, which determines demand-charge and
+        TOU exposure
+    """
     df = df.copy()
     e_total = df["out.electricity.total.energy_consumption.kwh"].astype(float)
     df["annual_kwh"] = e_total
@@ -151,10 +161,23 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
         / 29.3001)  # kWh -> therms (1 therm = 29.3001 kWh)
     e_cool = df["out.electricity.cooling.energy_consumption.kwh"].astype(float)
     e_heat = df["out.electricity.heating.energy_consumption.kwh"].astype(float)
+    e_hw = df.get(
+        "out.electricity.hot_water.energy_consumption.kwh",
+        pd.Series(0.0, index=df.index)).astype(float)
+    e_plug = df.get(
+        "out.electricity.plug_loads.energy_consumption.kwh",
+        pd.Series(0.0, index=df.index)).astype(float)
     df["cooling_share"] = np.where(e_total > 0, e_cool / e_total, 0)
     df["hvac_share"] = np.where(e_total > 0, (e_cool + e_heat) / e_total, 0)
+    df["hot_water_share"] = np.where(e_total > 0, e_hw / e_total, 0)
+    df["plug_loads_share"] = np.where(e_total > 0, e_plug / e_total, 0)
     df["summer_peak_kw"] = df["out.electricity.summer.peak.kw"].astype(float)
     df["winter_peak_kw"] = df["out.electricity.winter.peak.kw"].astype(float)
+    mean_kw = e_total / 8760.0
+    df["peakiness_summer"] = np.where(
+        mean_kw > 0, df["summer_peak_kw"] / mean_kw, 0)
+    df["peakiness_winter"] = np.where(
+        mean_kw > 0, df["winter_peak_kw"] / mean_kw, 0)
     df["sqft"] = df["in.sqft"].astype(float)
     df["vintage_decade"] = df["in.vintage"].map(VINTAGE_DECADE).fillna("post2000")
     df["ami_bin"] = df["in.area_median_income"]
@@ -164,19 +187,29 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 FEATURE_COLS = [
-    "annual_kwh", "annual_therms", "summer_peak_kw", "winter_peak_kw",
-    "cooling_share", "hvac_share", "sqft",
+    # Volume / size
+    "annual_kwh", "annual_therms", "sqft",
+    # Peak kW absolute (drives demand-charge $)
+    "summer_peak_kw", "winter_peak_kw",
+    # End-use composition (TOU shape proxy)
+    "cooling_share", "hvac_share",
+    "hot_water_share", "plug_loads_share",
+    # Peakiness (peak / mean - captures spiky vs flat shape)
+    "peakiness_summer", "peakiness_winter",
 ]
 
 
 def cluster_and_pick_medoids(
     df: pd.DataFrame,
-    target_total: int = 500,
+    target_total: int = 1500,
+    k_cap: int = 8,
 ) -> pd.DataFrame:
     """Stratify, cluster within strata, pick medoids.
 
     target_total guides per-stratum k selection so we land near target_total
-    medoids globally.
+    medoids globally. k_cap caps within-stratum cluster count; raise it
+    when the feature set grows (e.g. load-shape features added) so large
+    strata can differentiate on the new dimensions.
     """
     from sklearn.cluster import KMeans
     from sklearn.preprocessing import StandardScaler
@@ -187,7 +220,7 @@ def cluster_and_pick_medoids(
     ]
     grouped = df.groupby(strata_cols, dropna=False)
     n_strata = len(grouped)
-    # Per-stratum k - small strata get k=1, large get up to 5
+    # Per-stratum k - small strata get k=1, large get up to k_cap
     avg_k = max(1, target_total // max(n_strata, 1))
     rng = np.random.default_rng(42)
 
@@ -200,7 +233,7 @@ def cluster_and_pick_medoids(
             sub["cluster_weight"] = sub["weight"].sum()
             medoids.append(sub.iloc[[0]])
             continue
-        k = min(max(avg_k, 1), 5, len(sub))
+        k = min(max(avg_k, 1), k_cap, len(sub))
         X = sub[FEATURE_COLS].fillna(0).values
         Xs = StandardScaler().fit_transform(X)
         # KMeans++ with fixed seed for reproducibility
@@ -224,8 +257,15 @@ def cluster_and_pick_medoids(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--target", type=int, default=500,
-                    help="Approx target number of representative buildings.")
+    ap.add_argument("--target", type=int, default=1500,
+                    help="Approx target number of representative buildings. "
+                         "Raised from 500 when load-shape features were "
+                         "added (hot_water_share, plug_loads_share, "
+                         "peakiness_summer, peakiness_winter), so larger "
+                         "strata get k>1 and can differentiate on shape.")
+    ap.add_argument("--k-cap", type=int, default=8,
+                    help="Within-stratum cluster cap. Default 8; bump if "
+                         "you add more features.")
     ap.add_argument("--out", default=str(
         config.DATA_DIR / "representative_buildings.parquet"))
     ap.add_argument("--summary-out", default=str(
@@ -248,7 +288,8 @@ def main():
     df_feat = build_features(df_kept)
 
     print("Clustering by stratum + picking medoids ...")
-    medoids = cluster_and_pick_medoids(df_feat, target_total=args.target)
+    medoids = cluster_and_pick_medoids(
+        df_feat, target_total=args.target, k_cap=args.k_cap)
     print(f"  {len(medoids)} medoids; weighted pop "
           f"{medoids['cluster_weight'].sum():,.0f}")
 

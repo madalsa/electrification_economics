@@ -33,6 +33,89 @@ def test_vintage_decade_covers_all_known():
     assert expected.issubset(set(rb.VINTAGE_DECADE.keys()))
 
 
+def test_feature_cols_include_shape_features():
+    """Load-shape features must be in FEATURE_COLS so rate-design-sensitive
+    archetypes get differentiated within stratum."""
+    for col in ("hot_water_share", "plug_loads_share",
+                "peakiness_summer", "peakiness_winter"):
+        assert col in rb.FEATURE_COLS, col
+
+
+def test_build_features_adds_shape_columns():
+    """build_features must compute the new shape columns even when the
+    underlying end-use columns aren't present in the metadata (defaults to 0).
+    """
+    import numpy as np
+    df = pd.DataFrame({
+        "out.electricity.total.energy_consumption.kwh": [10000.0, 5000.0],
+        "out.natural_gas.total.energy_consumption.kwh": [0, 20000],
+        "out.electricity.cooling.energy_consumption.kwh": [2000, 0],
+        "out.electricity.heating.energy_consumption.kwh": [500, 1000],
+        "out.electricity.hot_water.energy_consumption.kwh": [800, 400],
+        "out.electricity.plug_loads.energy_consumption.kwh": [3000, 1500],
+        "out.electricity.summer.peak.kw": [6.0, 3.5],
+        "out.electricity.winter.peak.kw": [4.0, 4.5],
+        "in.sqft": [1800, 1200],
+        "in.vintage": ["1970s", "2000s"],
+        "in.area_median_income": ["100-120%", "80-100%"],
+        "in.geometry_building_type_recs": ["Single-Family Detached",
+                                            "Single-Family Detached"],
+        "in.heating_fuel": ["Natural Gas", "Natural Gas"],
+    })
+    out = rb.build_features(df)
+    # Hot water + plug loads shares
+    assert math.isclose(out["hot_water_share"].iloc[0], 0.08, abs_tol=1e-3)
+    assert math.isclose(out["plug_loads_share"].iloc[0], 0.30, abs_tol=1e-3)
+    # Peakiness = peak_kw / (annual_kwh/8760)
+    mean_kw_0 = 10000 / 8760
+    assert math.isclose(out["peakiness_summer"].iloc[0],
+                        6.0 / mean_kw_0, rel_tol=1e-3)
+    assert math.isclose(out["peakiness_winter"].iloc[0],
+                        4.0 / mean_kw_0, rel_tol=1e-3)
+
+
+def test_build_features_robust_to_missing_optional_columns():
+    """If hot_water or plug_loads end-use columns aren't in metadata,
+    build_features should default them to 0 rather than crash."""
+    df = pd.DataFrame({
+        "out.electricity.total.energy_consumption.kwh": [10000.0],
+        "out.natural_gas.total.energy_consumption.kwh": [0],
+        "out.electricity.cooling.energy_consumption.kwh": [2000],
+        "out.electricity.heating.energy_consumption.kwh": [500],
+        "out.electricity.summer.peak.kw": [6.0],
+        "out.electricity.winter.peak.kw": [4.0],
+        "in.sqft": [1800],
+        "in.vintage": ["2000s"],
+        "in.area_median_income": ["100-120%"],
+        "in.geometry_building_type_recs": ["Single-Family Detached"],
+        "in.heating_fuel": ["Natural Gas"],
+    })
+    out = rb.build_features(df)
+    assert out["hot_water_share"].iloc[0] == 0
+    assert out["plug_loads_share"].iloc[0] == 0
+
+
+def test_build_features_zero_kwh_safe():
+    """Buildings with zero annual_kwh must not raise; all shares -> 0."""
+    df = pd.DataFrame({
+        "out.electricity.total.energy_consumption.kwh": [0.0],
+        "out.natural_gas.total.energy_consumption.kwh": [0],
+        "out.electricity.cooling.energy_consumption.kwh": [0],
+        "out.electricity.heating.energy_consumption.kwh": [0],
+        "out.electricity.summer.peak.kw": [0.0],
+        "out.electricity.winter.peak.kw": [0.0],
+        "in.sqft": [1200],
+        "in.vintage": ["2000s"],
+        "in.area_median_income": ["100-120%"],
+        "in.geometry_building_type_recs": ["Single-Family Detached"],
+        "in.heating_fuel": ["None"],
+    })
+    out = rb.build_features(df)
+    for col in ("cooling_share", "hvac_share", "hot_water_share",
+                "plug_loads_share", "peakiness_summer", "peakiness_winter"):
+        assert out[col].iloc[0] == 0, col
+
+
 def test_output_artifact_present_after_run():
     """If user has run the script, artifact should exist; else skip."""
     p = config.DATA_DIR / "representative_buildings.parquet"

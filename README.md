@@ -27,9 +27,13 @@ pipelines (PGE / SCE / SDGE).
   full electrification.
 - **Sensitivities:** PV kW, battery kWh, VMT, gasoline price, gas price
   trajectory, IRA/SGIP/TECH incentive levels, discount rate, financing.
-- **Buildings:** representative sample (~500-1000 medoids from stratified
-  k-means clustering) with population weights; full-population validation
-  on a subset.
+- **Buildings:** representative sample (target ~1,500 medoids from
+  stratified k-means clustering) with population weights; full-population
+  validation on a subset. Clustering features include both *volume*
+  (annual_kwh, peak_kw, sqft, therms) and *shape* (cooling/heating/
+  hot-water/plug-loads end-use shares, summer/winter peakiness =
+  peak_kw / mean_kw) so archetypes differentiate on the load timing
+  patterns that drive rate-design sensitivity.
 
 ## Layout
 
