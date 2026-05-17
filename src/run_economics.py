@@ -6,6 +6,7 @@ Stages:
   2. sizing_optimizer          -> sizing_results / sizing_optimal_<u>.parquet
   3. vmt_sensitivity           -> ev_sensitivity_<u>.parquet
   4. upgrade11_economics       -> upgrade11_economics_<u>.parquet
+  5. bundle_economics          -> bundle_economics_<u>.parquet + bundle_summary.csv
 
 Usage:
     python -m electrification_economics.src.run_economics \
@@ -37,6 +38,7 @@ STAGES = {
     "2": ("sizing_optimizer",          "PV/battery sizing"),
     "3": ("vmt_sensitivity",           "VMT / gas-price sweep"),
     "4": ("upgrade11_economics",       "Upgrade 11 (heat pump)"),
+    "5": ("bundle_economics",          "Bundle (PV+EV+HP) economics"),
 }
 
 
