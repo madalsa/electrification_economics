@@ -63,8 +63,7 @@ VINTAGE_DECADE = {
 
 def load_metadata() -> pd.DataFrame:
     """Load metadata + annual results, attach utility, return slim frame."""
-    df = pd.read_parquet(
-        config.CR_ROOT / "CA_baseline_tmy_metadata_and_annual_results.parquet")
+    df = pd.read_parquet(config.METADATA_PARQUET)
     # Promote ResStock bldg_id (the metadata index) into a column so it
     # survives the puma merge below.
     df = df.reset_index()  # creates column named after index ("bldg_id")

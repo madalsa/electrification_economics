@@ -181,8 +181,7 @@ def main():
     # Annual gas figures live in metadata - re-merge if not present
     needed = "out.natural_gas.heating.energy_consumption.kwh"
     if needed not in bldgs.columns:
-        meta = pd.read_parquet(
-            config.CR_ROOT / "CA_baseline_tmy_metadata_and_annual_results.parquet")
+        meta = pd.read_parquet(config.METADATA_PARQUET)
         gas_cols = [c for c in meta.columns
                     if c.startswith("out.natural_gas.")]
         meta_subset = meta[gas_cols].copy()

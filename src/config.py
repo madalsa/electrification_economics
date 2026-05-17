@@ -44,7 +44,11 @@ PIPELINE_OUTPUTS = {
     },
 }
 
-METADATA_PARQUET = CR_ROOT / "CA_baseline_metadata_rescaled.parquet"
+# ResStock CA building metadata + annual electricity / NG / peak kW results.
+# The `_tmy_` variant bundles the annual-results columns we need
+# (out.electricity.*, out.natural_gas.*, peak kW); the plain
+# `metadata_rescaled` parquet has metadata only.
+METADATA_PARQUET = CR_ROOT / "CA_baseline_tmy_metadata_and_annual_results.parquet"
 RASS_SURVEY = CR_ROOT / "Final19_SW_CleanedSurvey.csv"
 PUMA_UTILITY = CR_ROOT / "puma_utility_data.csv"
 
