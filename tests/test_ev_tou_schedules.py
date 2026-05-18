@@ -123,6 +123,32 @@ def test_sdge_year_round_no_season_difference():
             == ev.effective_price_under_profile(profile, "sdge", "winter"))
 
 
+def test_sdge_documents_volumetric_only_basis():
+    """SDGE rates exclude the Base Services Charge (AB 205 IGFC).
+    A regression here would mean someone re-added the BSC inline,
+    which would double-count it against the canonical-6 fixed-charge
+    component in bundle_economics."""
+    s = ev.EV_TOU_SCHEDULES["sdge"]
+    assert s["rate_basis"] == "volumetric_only_excludes_base_services_charge"
+
+
+def test_sdge_documents_non_cca_class():
+    """The default SDGE EV-TOU-5 rates are for non-CCA (full bundled)
+    customers. CCA customers face different generation rates and would
+    need a separate schedule entry."""
+    s = ev.EV_TOU_SCHEDULES["sdge"]
+    assert s["customer_class"] == "non_cca_bundled"
+
+
+def test_workday_share_uses_eight_holidays():
+    """365 - 104 weekend days - 8 holidays = 253 workdays. Verifies
+    the CA tariff convention is reflected in the blending weight."""
+    expected = 253.0 / 365.0
+    assert abs(ev.WORKDAY_SHARE - expected) < 1e-9
+    assert abs(
+        ev.WORKDAY_SHARE + ev.WEEKEND_HOLIDAY_SHARE - 1.0) < 1e-9
+
+
 def test_pge_raises_until_populated():
     profile = np.full(24, 1.0 / 24)
     try:

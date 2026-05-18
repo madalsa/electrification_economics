@@ -43,24 +43,41 @@ from __future__ import annotations
 import numpy as np
 
 
-# Workdays-per-year proxy for averaging weekday + weekend rate exposure.
-# CA business calendar: ~250 weekdays - 10 holidays = ~240 workdays / 365
-# Treat weekend + holiday as one bucket.
-WORKDAY_SHARE = 240.0 / 365.0
+# Workdays-per-year for blending weekday vs weekend+holiday exposure.
+# CA convention (matches NERC): 8 holidays per year. Even when a holiday
+# lands on a weekend it's still listed; double-counting is acceptable
+# for the blended-exposure calculation. 365 - 104 weekend days - 8
+# holidays = 253 weekday-treated days; treat 112 days as
+# weekend-or-holiday for tariff bill purposes.
+WORKDAY_SHARE = 253.0 / 365.0
 WEEKEND_HOLIDAY_SHARE = 1.0 - WORKDAY_SHARE
 
 
 EV_TOU_SCHEDULES: dict[str, dict | None] = {
     # ---- SDGE EV-TOU-5 ----
-    # Source: SDGE published rate sheet, effective 2026-04-01.
-    # Year-round flat rates (no summer/winter differentiation as of 4/1/2026).
-    # Weekday vs weekend share THE SAME rates, but different time windows
-    # (weekend super-off-peak extends from 12am-2pm; weekday super-off-peak
-    # is 12am-6am + 10am-2pm).
-    # VERIFY: confirm year-round structure with SDGE current tariff PDF.
+    # Source: SDGE published rate plan page; rates effective 2026-04-01.
+    # Customer class: Non-CCA (full bundled service — Electric Generation
+    #   and Delivery). CCA customers (Clean Energy Alliance, San Diego
+    #   Community Power, etc.) face different generation rates; not modeled
+    #   in the default scenario set.
+    # Rates are VOLUMETRIC ONLY ($/kWh). They exclude the SDGE residential
+    #   Base Services Charge (the AB 205 IGFC implementation, effective
+    #   October 2025). The Base Services Charge enters the bundle bill
+    #   calculation via the canonical-6 designed-TOU rates'
+    #   `fixed_monthly_dollars` field — NOT here, because EV-TOU is a
+    #   parallel submetered tariff and the household pays the BSC once via
+    #   its base residential rate.
+    # Year-round flat (no summer/winter differentiation as of 2026-04-01).
+    # Weekday vs weekend share the same rates but have different time
+    # windows (weekend super-off-peak extends 12am-2pm; weekday super-off-
+    # peak is 12am-6am + 10am-2pm).
+    # Holidays observed: New Year's, President's, Memorial, Independence,
+    # Labor, Veterans, Thanksgiving, Christmas (8 days).
     "sdge": {
         "tariff_name": "EV-TOU-5",
         "effective_date": "2026-04-01",
+        "customer_class": "non_cca_bundled",
+        "rate_basis": "volumetric_only_excludes_base_services_charge",
         "season_split": False,
         "periods": [
             {
