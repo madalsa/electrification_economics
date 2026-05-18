@@ -32,13 +32,13 @@ def test_sce_schedule_validates():
     assert errors == [], errors
 
 
-def test_pge_unpopulated_flag_until_verified():
+def test_pge_schedule_validates():
     errors = ev.validate_schedule("pge")
-    assert any("not yet populated" in e for e in errors)
+    assert errors == [], errors
 
 
-def test_populated_utilities_lists_sdge_and_sce():
-    assert set(ev.populated_utilities()) == {"sdge", "sce"}
+def test_populated_utilities_lists_all_three():
+    assert set(ev.populated_utilities()) == {"sdge", "sce", "pge"}
 
 
 # ============================================================================
@@ -197,6 +197,103 @@ def test_sdge_year_round_no_season_difference():
 
 
 # ============================================================================
+# PGE EV2-A: three periods, no weekday/weekend differentiation
+# ============================================================================
+
+def test_pge_5pm_on_peak_summer_rate():
+    profile = np.zeros(24); profile[17] = 1.0
+    assert math.isclose(
+        ev.effective_price_under_profile(profile, "pge", "summer"),
+        0.53809, abs_tol=1e-6)
+
+
+def test_pge_5pm_on_peak_winter_rate():
+    profile = np.zeros(24); profile[17] = 1.0
+    assert math.isclose(
+        ev.effective_price_under_profile(profile, "pge", "winter"),
+        0.41099, abs_tol=1e-6)
+
+
+def test_pge_3pm_partial_peak_summer_rate():
+    """3pm is the lone-hour partial-peak window pre-on-peak."""
+    profile = np.zeros(24); profile[15] = 1.0
+    assert math.isclose(
+        ev.effective_price_under_profile(profile, "pge", "summer"),
+        0.42760, abs_tol=1e-6)
+
+
+def test_pge_3pm_partial_peak_winter_rate():
+    profile = np.zeros(24); profile[15] = 1.0
+    assert math.isclose(
+        ev.effective_price_under_profile(profile, "pge", "winter"),
+        0.39428, abs_tol=1e-6)
+
+
+def test_pge_10pm_partial_peak_post_onpeak():
+    """9pm-midnight is the second partial-peak window."""
+    profile = np.zeros(24); profile[22] = 1.0
+    assert math.isclose(
+        ev.effective_price_under_profile(profile, "pge", "summer"),
+        0.42760, abs_tol=1e-6)
+
+
+def test_pge_2pm_off_peak_year_round_same_rate():
+    """Off-peak rate is identical summer and winter for PGE."""
+    profile = np.zeros(24); profile[14] = 1.0
+    summer = ev.effective_price_under_profile(profile, "pge", "summer")
+    winter = ev.effective_price_under_profile(profile, "pge", "winter")
+    assert math.isclose(summer, 0.22558, abs_tol=1e-6)
+    assert summer == winter
+
+
+def test_pge_overnight_off_peak():
+    """Midnight-3pm is off-peak; concentrating charging there yields
+    off-peak rate."""
+    profile = np.zeros(24); profile[0:15] = 1.0 / 15
+    assert math.isclose(
+        ev.effective_price_under_profile(profile, "pge", "summer"),
+        0.22558, abs_tol=1e-6)
+
+
+def test_pge_no_weekday_weekend_difference():
+    """PGE EV2-A: 'every day including weekends and holidays'. The
+    weekday and weekend schedules must be identical."""
+    for season in ("summer", "winter"):
+        wd = ev.EV_TOU_SCHEDULES["pge"]["schedules"][f"{season}_weekday"]
+        we = ev.EV_TOU_SCHEDULES["pge"]["schedules"][f"{season}_weekend"]
+        assert wd == we, season
+
+
+def test_pge_three_tier_igfc_documented():
+    """PGE publishes three tiers (CARE / FERA / Non-CARE); all three
+    daily values must be encoded so the per-tier figure is available
+    even though the paper only uses CARE vs Non-CARE."""
+    bsc = ev.EV_TOU_SCHEDULES["pge"]["igfc_base_services_charge"]
+    assert bsc["structure"] == "per_day_tiered"
+    assert math.isclose(bsc["care_daily"],     0.19713, abs_tol=1e-6)
+    assert math.isclose(bsc["fera_daily"],     0.39688, abs_tol=1e-6)
+    assert math.isclose(bsc["non_care_daily"], 0.79343, abs_tol=1e-6)
+    # CARE / Non-CARE monthly equivalents should be ~$6 and ~$24
+    assert 5 < bsc["care_monthly_estimate"]     < 7
+    assert 23 < bsc["non_care_monthly_estimate"] < 26
+
+
+def test_pge_season_for_month():
+    for m in (6, 7, 8, 9):
+        assert ev.season_for_month("pge", m) == "summer"
+    for m in (1, 2, 3, 4, 5, 10, 11, 12):
+        assert ev.season_for_month("pge", m) == "winter"
+
+
+def test_pge_annual_blends_summer_winter_at_day_shares():
+    """5pm charging: annual = (122/365)*summer_onpeak + (243/365)*winter_onpeak."""
+    profile = np.zeros(24); profile[17] = 1.0
+    annual = ev.effective_price_under_profile(profile, "pge", "annual")
+    expected = (122 / 365) * 0.53809 + (243 / 365) * 0.41099
+    assert math.isclose(annual, expected, abs_tol=1e-6)
+
+
+# ============================================================================
 # Season-for-month
 # ============================================================================
 
@@ -227,34 +324,32 @@ def test_both_utilities_document_non_cca_class():
         assert ev.EV_TOU_SCHEDULES[u]["customer_class"] == "non_cca_bundled"
 
 
-def test_sce_documents_per_day_bsc():
-    """SCE's BSC is structured as $/day, distinct from SDGE's per-month."""
+def test_sce_documents_per_day_tiered_bsc():
+    """SCE BSC is per-day; non-CARE value pulled from EV-TOU plan page.
+    CARE / FERA daily values still to be pulled from SCE schedule -
+    None for now, but the field names must exist for cross-utility
+    consistency."""
     bsc = ev.EV_TOU_SCHEDULES["sce"]["igfc_base_services_charge"]
-    assert bsc["structure"] == "per_day_flat"
+    assert bsc["structure"] == "per_day_tiered"
     assert bsc["non_care_daily"] == 0.79
+    assert "care_daily" in bsc and "fera_daily" in bsc
     # Monthly equivalent should be ~$24 (sanity)
     assert 23.0 < bsc["non_care_monthly_estimate"] < 25.0
 
 
 def test_sdge_documents_per_month_tiered_bsc():
+    """SDGE BSC is per-month; tier values not yet pulled but the
+    schema fields must exist."""
     bsc = ev.EV_TOU_SCHEDULES["sdge"]["igfc_base_services_charge"]
     assert bsc["structure"] == "per_month_tiered"
+    for field in ("care_monthly", "fera_monthly", "non_care_monthly"):
+        assert field in bsc
 
 
 def test_workday_share_uses_eight_holidays():
     expected = 253.0 / 365.0
     assert abs(ev.WORKDAY_SHARE - expected) < 1e-9
     assert abs(ev.WORKDAY_SHARE + ev.WEEKEND_HOLIDAY_SHARE - 1.0) < 1e-9
-
-
-def test_pge_raises_until_populated():
-    profile = np.full(24, 1.0 / 24)
-    try:
-        ev.effective_price_under_profile(profile, "pge")
-    except KeyError as exc:
-        assert "not populated" in str(exc)
-        return
-    raise AssertionError("Expected KeyError for unpopulated PGE schedule")
 
 
 def test_sdge_seasonal_key_raises():

@@ -105,12 +105,15 @@ EV_TOU_SCHEDULES: dict[str, dict | None] = {
             ],
         },
         "igfc_base_services_charge": {
-            "structure": "per_month_tiered",
-            "non_care_monthly_estimate": None,   # TODO: pull current BSC
+            "structure": "per_month_tiered",   # SDGE billed monthly, not daily
+            "care_monthly":     None,    # TODO: pull from SDGE BSC schedule
+            "fera_monthly":     None,    # TODO; out-of-scope for paper
+            "non_care_monthly": None,    # TODO; expected ~$24/mo per pattern
             "note": ("SDGE residential Base Services Charge effective Oct "
-                     "2025 under AB 205 IGFC; income-graduated tiers. "
-                     "Applies to ALL SDGE residential customers regardless "
-                     "of rate plan."),
+                     "2025 under AB 205 IGFC. Tier values not pulled yet; "
+                     "expected pattern matches PGE/SCE (~$6/$24 CARE/"
+                     "Non-CARE monthly). FERA treated as Non-CARE in this "
+                     "paper."),
         },
     },
 
@@ -182,18 +185,103 @@ EV_TOU_SCHEDULES: dict[str, dict | None] = {
             ],
         },
         "igfc_base_services_charge": {
-            "structure": "per_day_flat",
-            "non_care_daily": 0.79,
-            "non_care_monthly_estimate": 0.79 * 365 / 12,   # ~$24.04
+            "structure": "per_day_tiered",
+            "care_daily":     None,    # TODO: pull from SCE BSC schedule
+            "fera_daily":     None,    # TODO; out-of-scope for paper
+            "non_care_daily": 0.79,    # ~$24.04/mo (from EV-TOU plan page)
+            "non_care_monthly_estimate": 0.79 * 365 / 12,
             "note": ("SCE residential Base Services Charge $0.79/day "
-                     "non-CARE under AB 205 IGFC; income-graduated tiers "
-                     "(CARE/FERA reduction). Applies to ALL SCE residential "
-                     "customers regardless of rate plan."),
+                     "non-CARE under AB 205 IGFC. CARE and FERA tier "
+                     "values not pulled yet from SCE schedule; "
+                     "expected pattern matches PGE (~$6/$12 CARE/FERA "
+                     "daily). FERA treated as Non-CARE in this paper."),
         },
     },
 
-    # ---- PGE EV2-A: pending screenshot verification ----
-    "pge": None,
+    # ---- PGE EV2-A ----
+    # Source: PGE EV2-A tariff sheet, Total Bundled Rates section.
+    # Customer class: Non-CCA bundled (Total Bundled Rates per screenshot).
+    # Rate basis: volumetric only; PGE's per-day Base Services Charge
+    #   (AB 205 IGFC) is excluded, enters bill via base residential
+    #   rate row.
+    # Seasonal: Summer (Jun 1 - Sep 30) vs Winter (Oct 1 - May 31).
+    # IMPORTANT: PGE EV2-A has NO weekday/weekend differentiation.
+    #   Time-of-use windows apply every day including weekends and holidays.
+    #   So summer_weekday == summer_weekend, and winter_weekday ==
+    #   winter_weekend (just replicated).
+    # Three periods: Off-Peak / Partial-Peak / Peak (tariff-faithful
+    #   naming; "partial_peak" is PGE-specific - SDGE has no analog,
+    #   SCE uses "mid_peak" with different windows).
+    # Off-peak rate is identical summer and winter ($0.22558). Peak and
+    #   partial-peak differ seasonally.
+    "pge": {
+        "tariff_name": "EV2-A",
+        "effective_date": "2026-04-01",   # placeholder; verify against bill
+        "customer_class": "non_cca_bundled",
+        "rate_basis": "volumetric_only_excludes_base_services_charge",
+        "season_split": True,
+        "summer_months": [6, 7, 8, 9],   # Jun 1 - Sep 30 per tariff text
+        "schedules": {
+            "summer_weekday": [
+                {"name": "off_peak",
+                 "hours": [(0, 15)],
+                 "rate": 0.22558},
+                {"name": "partial_peak",
+                 "hours": [(15, 16), (21, 24)],
+                 "rate": 0.42760},
+                {"name": "on_peak",
+                 "hours": [(16, 21)],
+                 "rate": 0.53809},
+            ],
+            "summer_weekend": [
+                # PGE: every day same as weekday
+                {"name": "off_peak",
+                 "hours": [(0, 15)],
+                 "rate": 0.22558},
+                {"name": "partial_peak",
+                 "hours": [(15, 16), (21, 24)],
+                 "rate": 0.42760},
+                {"name": "on_peak",
+                 "hours": [(16, 21)],
+                 "rate": 0.53809},
+            ],
+            "winter_weekday": [
+                {"name": "off_peak",
+                 "hours": [(0, 15)],
+                 "rate": 0.22558},
+                {"name": "partial_peak",
+                 "hours": [(15, 16), (21, 24)],
+                 "rate": 0.39428},
+                {"name": "on_peak",
+                 "hours": [(16, 21)],
+                 "rate": 0.41099},
+            ],
+            "winter_weekend": [
+                {"name": "off_peak",
+                 "hours": [(0, 15)],
+                 "rate": 0.22558},
+                {"name": "partial_peak",
+                 "hours": [(15, 16), (21, 24)],
+                 "rate": 0.39428},
+                {"name": "on_peak",
+                 "hours": [(16, 21)],
+                 "rate": 0.41099},
+            ],
+        },
+        "igfc_base_services_charge": {
+            "structure": "per_day_tiered",
+            "care_daily":     0.19713,    # ~$6.00/mo  CARE (<=200% FPL)
+            "fera_daily":     0.39688,    # ~$12.07/mo FERA; OUT OF SCOPE
+            "non_care_daily": 0.79343,    # ~$24.13/mo Non-CARE (>250% FPL)
+            "care_monthly_estimate":     0.19713 * 365 / 12,
+            "non_care_monthly_estimate": 0.79343 * 365 / 12,
+            "note": ("PGE Base Services Charge under AB 205 IGFC. Three "
+                     "published tiers (CARE / FERA / Non-CARE). This "
+                     "paper models only CARE vs Non-CARE; FERA "
+                     "(~200-250% FPL, narrow band) treated as Non-CARE "
+                     "for IGFC modeling purposes."),
+        },
+    },
 }
 
 
