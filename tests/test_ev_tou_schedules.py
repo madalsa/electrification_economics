@@ -265,17 +265,15 @@ def test_pge_no_weekday_weekend_difference():
 
 
 def test_pge_three_tier_igfc_documented():
-    """PGE publishes three tiers (CARE / FERA / Non-CARE); all three
-    daily values must be encoded so the per-tier figure is available
-    even though the paper only uses CARE vs Non-CARE."""
+    """PGE publishes three tiers; this paper models only CARE vs
+    Non-CARE but FERA is preserved for documentation."""
     bsc = ev.EV_TOU_SCHEDULES["pge"]["igfc_base_services_charge"]
-    assert bsc["structure"] == "per_day_tiered"
-    assert math.isclose(bsc["care_daily"],     0.19713, abs_tol=1e-6)
-    assert math.isclose(bsc["fera_daily"],     0.39688, abs_tol=1e-6)
-    assert math.isclose(bsc["non_care_daily"], 0.79343, abs_tol=1e-6)
-    # CARE / Non-CARE monthly equivalents should be ~$6 and ~$24
-    assert 5 < bsc["care_monthly_estimate"]     < 7
-    assert 23 < bsc["non_care_monthly_estimate"] < 26
+    # Sanity: CARE < FERA < Non-CARE
+    assert bsc["care_monthly"] < bsc["fera_monthly"] < bsc["non_care_monthly"]
+    # Roughly $6 / $12 / $24 monthly
+    assert math.isclose(bsc["care_monthly"],     6.00, abs_tol=0.5)
+    assert math.isclose(bsc["fera_monthly"],    12.07, abs_tol=0.5)
+    assert math.isclose(bsc["non_care_monthly"], 24.13, abs_tol=0.5)
 
 
 def test_pge_season_for_month():
@@ -324,32 +322,122 @@ def test_both_utilities_document_non_cca_class():
         assert ev.EV_TOU_SCHEDULES[u]["customer_class"] == "non_cca_bundled"
 
 
-def test_sce_documents_per_day_tiered_bsc():
-    """SCE BSC is per-day; non-CARE value pulled from EV-TOU plan page.
-    CARE / FERA daily values still to be pulled from SCE schedule -
-    None for now, but the field names must exist for cross-utility
-    consistency."""
+def test_bsc_schema_is_uniformly_tiered_monthly():
+    """All three utilities now store BSC in $/month at the same tier
+    granularity (CARE / FERA / Non-CARE), regardless of how the source
+    tariff publishes the value. This is the unified IGFC modeling API."""
+    for u in ev.populated_utilities():
+        bsc = ev.EV_TOU_SCHEDULES[u]["igfc_base_services_charge"]
+        assert bsc["structure"] == "tiered_monthly", u
+        for field in ("care_monthly", "fera_monthly", "non_care_monthly"):
+            assert field in bsc, f"{u}: missing {field}"
+
+
+def test_sce_non_care_bsc_monthly_value():
+    """SCE non-CARE BSC ~$24/mo (sourced from $0.79/day, normalized)."""
     bsc = ev.EV_TOU_SCHEDULES["sce"]["igfc_base_services_charge"]
-    assert bsc["structure"] == "per_day_tiered"
-    assert bsc["non_care_daily"] == 0.79
-    assert "care_daily" in bsc and "fera_daily" in bsc
-    # Monthly equivalent should be ~$24 (sanity)
-    assert 23.0 < bsc["non_care_monthly_estimate"] < 25.0
+    assert 23.5 < bsc["non_care_monthly"] < 24.5
 
 
-def test_sdge_documents_per_month_tiered_bsc():
-    """SDGE BSC is per-month; tier values not yet pulled but the
-    schema fields must exist."""
+def test_pge_three_tier_bsc_monthly_values():
+    """PGE has all three tier values populated in monthly."""
+    bsc = ev.EV_TOU_SCHEDULES["pge"]["igfc_base_services_charge"]
+    assert 5 < bsc["care_monthly"] < 7
+    assert 11 < bsc["fera_monthly"] < 13
+    assert 23 < bsc["non_care_monthly"] < 26
+
+
+def test_sdge_bsc_tier_values_not_yet_populated():
+    """SDGE schema fields are in place but values pending data pull.
+    This test will need updating once the SDGE BSC schedule is added."""
     bsc = ev.EV_TOU_SCHEDULES["sdge"]["igfc_base_services_charge"]
-    assert bsc["structure"] == "per_month_tiered"
-    for field in ("care_monthly", "fera_monthly", "non_care_monthly"):
-        assert field in bsc
+    assert bsc["care_monthly"] is None
+    assert bsc["non_care_monthly"] is None
 
 
 def test_workday_share_uses_eight_holidays():
     expected = 253.0 / 365.0
     assert abs(ev.WORKDAY_SHARE - expected) < 1e-9
     assert abs(ev.WORKDAY_SHARE + ev.WEEKEND_HOLIDAY_SHARE - 1.0) < 1e-9
+
+
+# ============================================================================
+# Cross-utility period-naming documentation contract
+# ============================================================================
+
+def test_pge_uses_partial_peak_label():
+    """PGE has its tariff-specific 'partial_peak' label; no other
+    utility uses this label."""
+    pge_periods = set(ev.period_names_for_utility("pge"))
+    assert "partial_peak" in pge_periods
+    for u in ("sce", "sdge"):
+        assert "partial_peak" not in set(ev.period_names_for_utility(u)), u
+
+
+def test_sce_uses_mid_peak_label_pge_sdge_do_not():
+    """SCE's mid_peak appears in summer weekend and winter. PGE and
+    SDGE don't use this label."""
+    assert "mid_peak" in set(ev.period_names_for_utility("sce"))
+    assert "mid_peak" not in set(ev.period_names_for_utility("pge"))
+    assert "mid_peak" not in set(ev.period_names_for_utility("sdge"))
+
+
+def test_sdge_off_peak_is_middle_rate_not_cheapest():
+    """SDGE's `off_peak` is the MIDDLE rate (47.6c). The cheapest is
+    super_off_peak (12.1c). Reading SDGE's 'off_peak' as 'cheapest'
+    would be wrong; this test prevents accidental rename / collapse."""
+    off_peak = ev.rate_for_period("sdge", "year", "weekday", "off_peak")
+    super_off = ev.rate_for_period("sdge", "year", "weekday",
+                                    "super_off_peak")
+    on_peak = ev.rate_for_period("sdge", "year", "weekday", "on_peak")
+    assert super_off < off_peak < on_peak
+    assert math.isclose(super_off, 0.121, abs_tol=1e-6)
+    assert math.isclose(off_peak,  0.476, abs_tol=1e-6)
+    assert math.isclose(on_peak,   0.533, abs_tol=1e-6)
+
+
+def test_pge_period_names_are_three():
+    assert set(ev.period_names_for_utility("pge")) == {
+        "off_peak", "partial_peak", "on_peak"}
+
+
+def test_sce_period_names_are_four_across_seasons():
+    """SCE union: off_peak, on_peak (summer wd only), mid_peak (summer
+    we + winter), super_off_peak (winter only)."""
+    assert set(ev.period_names_for_utility("sce")) == {
+        "off_peak", "on_peak", "mid_peak", "super_off_peak"}
+
+
+def test_sdge_period_names_are_three():
+    assert set(ev.period_names_for_utility("sdge")) == {
+        "super_off_peak", "off_peak", "on_peak"}
+
+
+def test_rate_for_period_lookups_match_screenshots():
+    """Spot checks: pull individual rates by period name."""
+    assert math.isclose(
+        ev.rate_for_period("pge", "summer", "weekday", "on_peak"),
+        0.53809, abs_tol=1e-6)
+    assert math.isclose(
+        ev.rate_for_period("sce", "summer", "weekend", "mid_peak"),
+        0.40, abs_tol=1e-6)
+    assert math.isclose(
+        ev.rate_for_period("sce", "summer", "weekday", "on_peak"),
+        0.59, abs_tol=1e-6)
+    assert math.isclose(
+        ev.rate_for_period("sdge", "year", "weekend", "super_off_peak"),
+        0.121, abs_tol=1e-6)
+
+
+def test_rate_for_period_unknown_raises():
+    """Asking for a nonexistent period raises rather than silently
+    returning a default."""
+    try:
+        ev.rate_for_period("pge", "summer", "weekday", "mid_peak")
+    except KeyError:
+        return
+    raise AssertionError(
+        "expected KeyError for mid_peak on PGE (no such period)")
 
 
 def test_sdge_seasonal_key_raises():

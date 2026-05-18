@@ -28,12 +28,41 @@ Schema per utility:
                         AB 205 IGFC. NOT applied here - enters the bundle
                         bill via the base residential rate row.
 
-Period naming conventions across utilities:
-    super_off_peak (lowest rate, typically overnight + midday solar hours)
-    off_peak       (low rate, shoulder periods)
-    mid_peak       (intermediate rate, typically 4-9pm weekend or
-                    weekday partial-peak windows)
-    on_peak        (highest rate, typically weekday 4-9pm)
+Period naming differs across utilities; period names are tariff-faithful
+and NOT semantically normalized. Always look up dollar values via
+rate_for_period() or effective_price_under_profile(), not by assuming a
+name carries a fixed price implication.
+
+Cross-utility period cheat sheet (2026 effective):
+
+  PGE EV2-A — three periods, same windows every day of the year:
+    off_peak     12am-3pm           22.56c summer & winter
+    partial_peak 3pm-4pm + 9pm-12am 42.76c summer / 39.43c winter
+    on_peak      4pm-9pm            53.81c summer / 41.10c winter
+    (PGE's `partial_peak` is its tariff-specific shoulder; no other
+     utility uses this exact label.)
+
+  SCE TOU-D-PRIME — seasonal, with weekday/weekend RATE differentiation
+  in summer (but not winter):
+    Summer weekday: off_peak 26c (12am-4pm, 9pm-12am), on_peak 59c (4-9pm)
+    Summer weekend: off_peak 26c (12am-4pm, 9pm-12am), mid_peak 40c (4-9pm)
+    Winter (weekday + weekend identical):
+        off_peak 24c (12am-8am, 9pm-12am),
+        super_off_peak 24c (8am-4pm; numerically equal to off_peak but
+                            labeled distinctly in the tariff),
+        mid_peak 56c (4-9pm)
+    (SCE's `mid_peak` appears in both summer weekend and winter, at
+     different rates and different price-rank positions.)
+
+  SDGE EV-TOU-5 — year-round flat, weekday vs weekend WINDOW
+  differentiation (rates same):
+    super_off_peak 12.1c  (CHEAPEST; weekday 12am-6am + 10am-2pm;
+                           weekend 12am-2pm — covers midday solar)
+    off_peak       47.6c  (MIDDLE rate — NOT the cheapest)
+    on_peak        53.3c  (4-9pm daily)
+    (SDGE's `off_peak` is the MIDDLE rate, not the cheapest. The
+     cheapest is super_off_peak. Reading the name as "lowest rate"
+     would be wrong.)
 
 Convention: hours are half-open 24h intervals. (16, 21) = 4pm to 9pm.
 Weekends + holidays share one schedule. Holidays = NERC standard 8 days
@@ -44,7 +73,9 @@ Helpers:
     validate_schedule(utility)                 -> list[str] of errors
     period_weights_for_schedule(profile, u, season, day_type) -> dict
     effective_price_under_profile(profile, u, season="annual") -> $/kWh
+    rate_for_period(u, season, day_type, period_name)         -> $/kWh
     season_for_month(u, m)                     -> "summer"/"winter"/"year"
+    period_names_for_utility(u)                -> sorted list of names
     populated_utilities()                      -> list[str]
 """
 
@@ -105,15 +136,14 @@ EV_TOU_SCHEDULES: dict[str, dict | None] = {
             ],
         },
         "igfc_base_services_charge": {
-            "structure": "per_month_tiered",   # SDGE billed monthly, not daily
+            "structure": "tiered_monthly",
             "care_monthly":     None,    # TODO: pull from SDGE BSC schedule
-            "fera_monthly":     None,    # TODO; out-of-scope for paper
+            "fera_monthly":     None,    # OUT OF SCOPE for paper; populate if needed
             "non_care_monthly": None,    # TODO; expected ~$24/mo per pattern
             "note": ("SDGE residential Base Services Charge effective Oct "
                      "2025 under AB 205 IGFC. Tier values not pulled yet; "
-                     "expected pattern matches PGE/SCE (~$6/$24 CARE/"
-                     "Non-CARE monthly). FERA treated as Non-CARE in this "
-                     "paper."),
+                     "expected pattern matches PGE/SCE (~$6 CARE, ~$24 "
+                     "Non-CARE). FERA treated as Non-CARE for paper."),
         },
     },
 
@@ -185,16 +215,16 @@ EV_TOU_SCHEDULES: dict[str, dict | None] = {
             ],
         },
         "igfc_base_services_charge": {
-            "structure": "per_day_tiered",
-            "care_daily":     None,    # TODO: pull from SCE BSC schedule
-            "fera_daily":     None,    # TODO; out-of-scope for paper
-            "non_care_daily": 0.79,    # ~$24.04/mo (from EV-TOU plan page)
-            "non_care_monthly_estimate": 0.79 * 365 / 12,
-            "note": ("SCE residential Base Services Charge $0.79/day "
-                     "non-CARE under AB 205 IGFC. CARE and FERA tier "
-                     "values not pulled yet from SCE schedule; "
-                     "expected pattern matches PGE (~$6/$12 CARE/FERA "
-                     "daily). FERA treated as Non-CARE in this paper."),
+            "structure": "tiered_monthly",
+            "care_monthly":     None,    # TODO: pull from SCE BSC schedule
+            "fera_monthly":     None,    # OUT OF SCOPE; populate if needed
+            "non_care_monthly": 24.04,   # source: SCE plan page $0.79/day
+            "note": ("SCE residential Base Services Charge under AB 205 "
+                     "IGFC; ~$24/mo Non-CARE (source: $0.79/day flat from "
+                     "EV-TOU plan page; normalized to monthly here). CARE "
+                     "and FERA monthly values not pulled yet; expected "
+                     "pattern matches PGE (~$6 CARE, ~$12 FERA). FERA "
+                     "treated as Non-CARE for paper."),
         },
     },
 
@@ -269,17 +299,15 @@ EV_TOU_SCHEDULES: dict[str, dict | None] = {
             ],
         },
         "igfc_base_services_charge": {
-            "structure": "per_day_tiered",
-            "care_daily":     0.19713,    # ~$6.00/mo  CARE (<=200% FPL)
-            "fera_daily":     0.39688,    # ~$12.07/mo FERA; OUT OF SCOPE
-            "non_care_daily": 0.79343,    # ~$24.13/mo Non-CARE (>250% FPL)
-            "care_monthly_estimate":     0.19713 * 365 / 12,
-            "non_care_monthly_estimate": 0.79343 * 365 / 12,
+            "structure": "tiered_monthly",
+            "care_monthly":     6.00,    # CARE (<=200% FPL); source $0.19713/day
+            "fera_monthly":     12.07,   # FERA (~200-250% FPL); OUT OF SCOPE; $0.39688/day
+            "non_care_monthly": 24.13,   # Non-CARE (>250% FPL); source $0.79343/day
             "note": ("PGE Base Services Charge under AB 205 IGFC. Three "
-                     "published tiers (CARE / FERA / Non-CARE). This "
-                     "paper models only CARE vs Non-CARE; FERA "
-                     "(~200-250% FPL, narrow band) treated as Non-CARE "
-                     "for IGFC modeling purposes."),
+                     "published tiers (CARE / FERA / Non-CARE). PGE bills "
+                     "this per-day on the tariff; normalized to monthly "
+                     "here (x365/12). This paper models only CARE vs "
+                     "Non-CARE; FERA treated as Non-CARE."),
         },
     },
 }
@@ -460,3 +488,44 @@ def season_for_month(utility: str, month: int) -> str:
 def populated_utilities() -> list[str]:
     """Utilities whose EV-TOU schedule is populated (non-None)."""
     return [u for u, s in EV_TOU_SCHEDULES.items() if s is not None]
+
+
+def period_names_for_utility(utility: str) -> list[str]:
+    """Sorted unique period names across this utility's schedules.
+
+    Useful for figure-grouping and for spot-checking that period naming
+    conventions are tariff-faithful per utility (see module docstring).
+    """
+    s = EV_TOU_SCHEDULES.get(utility)
+    if s is None:
+        return []
+    names: set[str] = set()
+    for sched in s["schedules"].values():
+        for period in sched:
+            names.add(period["name"])
+    return sorted(names)
+
+
+def rate_for_period(
+    utility: str, season: str, day_type: str, period_name: str,
+) -> float:
+    """Look up the $/kWh rate for one specific (season, day_type, period).
+
+    Raises KeyError if the combination isn't defined. Use this rather
+    than name-based heuristics — SDGE's 'off_peak' is the middle rate,
+    not the cheapest; relying on the name to imply price rank is wrong.
+    """
+    s = EV_TOU_SCHEDULES.get(utility)
+    if s is None:
+        raise KeyError(f"EV-TOU schedule for {utility} not populated yet")
+    key = f"{season}_{day_type}"
+    if key not in s["schedules"]:
+        raise KeyError(
+            f"{utility} has no schedule for {key} "
+            f"(available: {sorted(s['schedules'].keys())})")
+    for period in s["schedules"][key]:
+        if period["name"] == period_name:
+            return float(period["rate"])
+    raise KeyError(
+        f"{utility}.{key} has no period named '{period_name}' "
+        f"(available: {[p['name'] for p in s['schedules'][key]]})")
