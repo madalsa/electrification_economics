@@ -1,4 +1,10 @@
-"""Smoke tests for rate_designer_extended."""
+"""Tests for the thin rate-extended reader.
+
+The parent rate designer is the source of truth; this module just
+re-emits its scenarios under the EE-extended schema and tacks on
+EV-TOU + NBT-overlay rows. So most tests check schema preservation
+and the EE-specific additions, NOT the rate values themselves.
+"""
 
 import sys
 from pathlib import Path
@@ -7,81 +13,126 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd
 
-from src import rate_designer_extended as rde, config
+from src import config, rate_designer_extended as rde
 
 
-def test_build_extended_default_categories():
-    """Default build (no --include-demand-charges) should have three
-    rate categories: designed_tou, ev_submetered_tou, export_overlay."""
-    df = rde.build_extended("pge")
-    types = set(df["rate_type"].unique())
-    assert "designed_tou" in types
-    assert "ev_submetered_tou" in types
-    assert "export_overlay" in types
-    # DC is parked for follow-up paper; must not appear by default
-    assert "demand_charge" not in types
+# ============================================================================
+# EV-TOU rows (don't require parent files)
+# ============================================================================
+
+def test_ev_tou_row_per_utility():
+    for u in ("pge", "sce", "sdge"):
+        df = rde.add_ev_only_tou_row(u)
+        assert len(df) == 1, u
+        assert df.iloc[0]["scenario_id"] == f"EV_TOU_{u.upper()}"
+        assert df.iloc[0]["rate_type"] == "ev_submetered_tou"
 
 
-def test_build_extended_include_dc_flag():
-    """--include-demand-charges restores DC_5 / DC_15."""
-    df = rde.build_extended("pge", include_demand_charges=True)
-    types = set(df["rate_type"].unique())
-    assert "demand_charge" in types
-    assert {"DC_5", "DC_15"}.issubset(set(df["scenario_id"]))
+def test_ev_tou_row_carries_zero_fixed_charge():
+    """EV-TOU is a parallel submetered tariff; BSC enters via base rate.
+    The EV-TOU row itself should not double-count fixed charges."""
+    df = rde.add_ev_only_tou_row("sdge")
+    assert df.iloc[0]["fixed_monthly_care"] == 0.0
+    assert df.iloc[0]["fixed_monthly_non_care"] == 0.0
 
 
-def test_designed_count_matches_source():
-    """Re-emitted designed rows should match the 40 in the source."""
-    src = pd.read_csv(config.CR_ROOT / "rate_scenarios_pge_fresh.csv")
-    df = rde.build_extended("pge")
-    n_designed = (df["rate_type"] == "designed_tou").sum()
-    assert n_designed == len(src)
+def test_ev_tou_super_offpeak_below_on_peak():
+    for u in ("pge", "sce", "sdge"):
+        df = rde.add_ev_only_tou_row(u)
+        assert df.iloc[0]["ev_super_offpeak"] < df.iloc[0]["ev_on_peak"], u
 
 
-def test_dc_volumetric_lower_than_base_when_included():
-    """DC scenarios fund part of revenue via demand charge, so volumetric
-    must be lower than the F0_WF0_ROE0 base."""
-    df = rde.build_extended("sce", include_demand_charges=True)
-    base = pd.read_csv(config.CR_ROOT / "rate_scenarios_sce_fresh.csv")
-    base_summer_peak = base[base["Scenario"] == "F0_WF0_ROE0"]["summer_peak"].iloc[0]
-    for dc_id in ("DC_5", "DC_15"):
-        dc_row = df[df["scenario_id"] == dc_id].iloc[0]
-        assert dc_row["summer_peak"] < base_summer_peak
-
-
-def test_dc_revenue_lowers_with_higher_dc_when_included():
-    df = rde.build_extended("pge", include_demand_charges=True)
-    dc5 = df[df["scenario_id"] == "DC_5"].iloc[0]
-    dc15 = df[df["scenario_id"] == "DC_15"].iloc[0]
-    assert dc15["summer_peak"] < dc5["summer_peak"]
-
-
-def test_ev_tou_super_offpeak_lower_than_peak():
-    """Pure-Python check, no parent files needed."""
-    df = rde.add_ev_only_tou_scenario()
-    ev = df.iloc[0]
-    assert ev["ev_super_offpeak"] < ev["ev_on_peak"]
-
+# ============================================================================
+# Export overlays (don't require parent files)
+# ============================================================================
 
 def test_export_regimes_are_nbt_family():
-    """Post-May-2026: export regimes drop NEM2 / flat counterfactuals
-    and add NBT-scaled CPUC-softening sensitivities. No parent files."""
-    df = rde.add_export_regime_scenarios()
-    regimes = set(df["export_regime"])
-    assert regimes == {"nbt_hourly", "nbt_scaled_125", "nbt_scaled_150"}, regimes
-    # Removed regimes must not silently re-appear
-    assert "nem2_retail" not in regimes
-    assert "flat_5c" not in regimes
-    assert "flat_15c" not in regimes
+    """Post-May-2026: drop NEM2 and flat counterfactuals; only NBT
+    scaling sensitivities."""
+    df = rde.add_export_regime_overlays()
+    assert set(df["export_regime"]) == {
+        "nbt_hourly", "nbt_scaled_125", "nbt_scaled_150"}
 
 
 def test_export_overlay_multipliers_match_names():
-    """Multipliers must match the suffix in the regime name. No parent files."""
-    df = rde.add_export_regime_scenarios()
+    df = rde.add_export_regime_overlays()
     by_regime = df.set_index("export_regime")["eec_multiplier"]
-    assert by_regime.loc["nbt_hourly"] == 1.0
-    assert by_regime.loc["nbt_scaled_125"] == 1.25
-    assert by_regime.loc["nbt_scaled_150"] == 1.50
+    assert by_regime["nbt_hourly"] == 1.0
+    assert by_regime["nbt_scaled_125"] == 1.25
+    assert by_regime["nbt_scaled_150"] == 1.50
+
+
+# ============================================================================
+# Full build_extended (requires parent rate_scenarios_<u>_fresh.csv)
+# ============================================================================
+
+def test_build_extended_has_three_rate_categories():
+    df = rde.build_extended("pge")
+    types = set(df["rate_type"].unique())
+    assert types == {"designed_tou", "ev_submetered_tou", "export_overlay"}
+
+
+def test_build_extended_preserves_all_40_designed_scenarios():
+    """No filtering / no canonical-6 narrowing - all 40 from the parent
+    pass through verbatim."""
+    src = pd.read_csv(config.CR_ROOT / "rate_scenarios_pge_fresh.csv")
+    df = rde.build_extended("pge")
+    designed = df[df["rate_type"] == "designed_tou"]
+    assert len(designed) == len(src) == 40
+
+
+def test_build_extended_preserves_tier_fixed_charges():
+    """Fixed_CARE / Fixed_NonCARE round-trip into fixed_monthly_care /
+    fixed_monthly_non_care; values match the parent verbatim."""
+    src = pd.read_csv(config.CR_ROOT / "rate_scenarios_pge_fresh.csv")
+    df = rde.build_extended("pge")
+    for scenario in ("F0_WF0_ROE0", "F25_WF0_ROE0", "F50_WF0_ROE0",
+                     "F100_WF0_ROE0", "F100_WF1_ROE1.5"):
+        src_row = src[src["Scenario"] == scenario].iloc[0]
+        ee_row = df[df["scenario_id"] == scenario].iloc[0]
+        assert ee_row["fixed_monthly_care"] == src_row["Fixed_CARE"], scenario
+        assert (ee_row["fixed_monthly_non_care"]
+                == src_row["Fixed_NonCARE"]), scenario
+
+
+def test_care_fixed_below_non_care_at_higher_F():
+    """In any non-F0 scenario the CARE fixed charge is income-graduated
+    BELOW the Non-CARE charge. (F0 has both at 0; equality is allowed.)
+    """
+    df = rde.build_extended("sce")
+    designed = df[df["rate_type"] == "designed_tou"].copy()
+    for _, row in designed.iterrows():
+        if row["Fixed_Pct_TD"] == 0:
+            assert row["fixed_monthly_care"] == row["fixed_monthly_non_care"]
+        else:
+            assert (row["fixed_monthly_care"]
+                    < row["fixed_monthly_non_care"]), row["scenario_id"]
+
+
+def test_higher_F_means_higher_fixed_charge():
+    """Within a (WF, ROE) family, F0 < F25 < F50 < F75 < F100 in fixed
+    charges. Sanity check that the parent's rate designer produced a
+    monotonic progression."""
+    df = rde.build_extended("pge")
+    designed = df[df["rate_type"] == "designed_tou"]
+    family = designed[
+        (designed["Remove_Wildfire"] == False) &
+        (designed["ROE_Reduction"] == 0.0)
+    ].sort_values("Fixed_Pct_TD")
+    fixed_nc = family["fixed_monthly_non_care"].tolist()
+    assert fixed_nc == sorted(fixed_nc)
+    fixed_c = family["fixed_monthly_care"].tolist()
+    assert fixed_c == sorted(fixed_c)
+
+
+def test_designed_rows_carry_parent_metadata():
+    """Fixed_Pct_TD, Remove_Wildfire, ROE_Reduction must pass through
+    so downstream code can group / filter by structural axes."""
+    df = rde.build_extended("sdge")
+    designed = df[df["rate_type"] == "designed_tou"]
+    for col in ("Fixed_Pct_TD", "Remove_Wildfire", "ROE_Reduction",
+                "Scaling", "Vol_Avg", "Total_Revenue"):
+        assert col in designed.columns
 
 
 if __name__ == "__main__":

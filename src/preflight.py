@@ -195,21 +195,26 @@ def check_rate_scenarios(utilities: list[str]) -> list[Check]:
             checks.append(Check(f"rate_scenarios_{u}_fresh", FAIL,
                                 f"unreadable: {exc}"))
             continue
-        if "Scenario" not in df.columns:
-            checks.append(Check(f"rate_scenarios_{u}_fresh", FAIL,
-                                "missing 'Scenario' column"))
+        required_cols = {"Scenario", "Fixed_CARE", "Fixed_NonCARE",
+                          "Fixed_Pct_TD", "Remove_Wildfire",
+                          "ROE_Reduction"}
+        missing_cols = required_cols - set(df.columns)
+        if missing_cols:
+            checks.append(Check(
+                f"rate_scenarios_{u}_fresh", FAIL,
+                f"missing required columns: {missing_cols}"))
             continue
-        from src import rate_designer_extended as rd
-        present = set(df["Scenario"])
-        missing = set(rd.CANONICAL_8) - present
-        if missing:
+        # Sanity: parent rate designer emits 40 scenarios per utility
+        # (F{0,25,50,75,100} x WF{0,1} x ROE{0,0.5,1.0,1.5}).
+        if len(df) != 40:
             checks.append(Check(
                 f"rate_scenarios_{u}_fresh", WARN,
-                f"{len(df)} scenarios; canonical-8 missing: {missing}"))
+                f"{len(df)} scenarios (expected 40)"))
         else:
             checks.append(Check(
                 f"rate_scenarios_{u}_fresh", PASS,
-                f"{len(df)} scenarios; all 6 canonical present"))
+                f"40 scenarios; tier-graduated fixed-charge columns "
+                f"present"))
     return checks
 
 

@@ -201,7 +201,11 @@ def build_sizing_table(utility: str,
             prices = get_period_prices(r, list(weights.keys()))
             if not prices:
                 continue
-            fixed_monthly = float(r.get("fixed_monthly_dollars") or 0.0)
+            # Fixed monthly cancels in (bill_after - bill_before) since
+            # both legs face the same rate; tier-specific lookup happens
+            # in bundle_economics where the fixed charge is actually
+            # billed to a single household.
+            fixed_monthly = float(r.get("fixed_monthly_non_care") or 0.0)
             dc = float(r.get("demand_charge_per_kw_mo") or 0.0)
             for pv_kw, batt_kwh in product(pv_grid, batt_grid):
                 if pv_kw == 0 and batt_kwh == 0:

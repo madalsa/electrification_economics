@@ -1,41 +1,46 @@
-"""Extend the rate-design space with rates relevant to the paper.
+"""Thin reader over the parent rate-designer outputs + EE-specific extras.
 
-The existing parent pipeline produces 40 designed scenarios per utility
-along three policy axes (Fixed_Pct_TD, Remove_Wildfire, ROE_Reduction).
-The paper's canonical-6 subset of those is the headline rate-reform set
-(see CANONICAL_8 below). For the personal-economics paper we ADD:
+The parent `rate_designer.py` (in the california_rates repo) is the
+canonical source for all designed rate scenarios. It runs the
+benchmarked, revenue-neutral, income-graduated rate design across
+40 scenarios per utility:
 
-  EV-only TOU (separate submetered tariff):
-    - EV_TOU:  super-off-peak overnight / on-peak 4-9pm
-    TODO: replace single proxy with per-utility rows (PGE EV2-A,
-    SCE TOU-EV-9-PRIME, SDGE EV-TOU-5) once 2026 rate sheets verified.
+    F{0,25,50,75,100} x WF{0,1} x ROE{0,0.5,1.0,1.5}  = 40
 
-  Export-regime overlays (modeled as overlay, not re-priced import):
-    - EXPORT_NBT_HOURLY:     default for new interconnections (CPUC NBT)
-    - EXPORT_NBT_SCALED_125: NBT softened by 25% (CPUC adjustment scenario)
-    - EXPORT_NBT_SCALED_150: NBT softened by 50% (more aggressive softening)
+Each scenario carries tier-specific fixed charges (Fixed_CARE,
+Fixed_NonCARE) in $/month, plus utility-specific TOU prices.
 
-The existing 40 scenarios cover the fixed-charge / wildfire / ROE space;
-we re-emit them in the extended schema but unchanged.
+EE consumes these outputs VERBATIM. Nothing in this module re-derives
+or approximates fixed charges, T&D shares, customer counts, or
+revenue calibration - all of that is the parent rate designer's job
+and has been benchmarked there.
 
-Removed from the default flow (kept in module for future paper / option):
-  - DC_5 / DC_15 demand-charge variants. Residential DC is not currently
-    on the CPUC table in CA and our pipeline doesn't model behavioral
-    response to the price signal, so DC scenarios would be misleading
-    as a headline rate-reform comparator. The functions
-    add_demand_charge_scenarios remains in the module for a future paper
-    focused on residential DC + electrification compatibility (the
-    Borenstein peak-demand angle).
-  - NEM 2.0 retail export, flat 5c / 15c counterfactuals. NEM 2.0 is
-    grandfathered out and abstract flat rates aren't policy-relevant.
+What this module DOES do:
 
-OUTPUT: rate_scenarios_extended_<utility>.csv with extended schema:
-    scenario_id, rate_type, fixed_monthly_dollars,
-    demand_charge_per_kw_mo, peak_window,
+  1. Read the parent's rate_scenarios_<u>_fresh.csv unchanged.
+  2. Rename Fixed_CARE -> fixed_monthly_care and Fixed_NonCARE ->
+     fixed_monthly_non_care for downstream consistency.
+  3. Append EE-specific extra rows:
+       - one EV-TOU row per utility (from src.ev_tou_schedules)
+       - three export-regime overlay rows (nbt_hourly, nbt_scaled_125,
+         nbt_scaled_150) with eec_multiplier column for runtime sensitivity
+  4. Write rate_scenarios_extended_<u>.csv to data/.
+
+Income-graduation handling:
+  fixed_monthly_care and fixed_monthly_non_care travel through as
+  separate columns. bundle_economics applies the household's tier
+  (CARE if ami_frac <= 0.80, else Non-CARE) at evaluation time.
+  Volumetric TOU prices are uniform across tiers per the parent
+  rate designer's output schema.
+
+OUTPUT schema (rate_scenarios_extended_<utility>.csv):
+    scenario_id, rate_type, source_scenario,
+    Fixed_Pct_TD, Remove_Wildfire, ROE_Reduction,
+    fixed_monthly_care, fixed_monthly_non_care,
     summer_peak, summer_midpeak, summer_offpeak,
     winter_peak, winter_midpeak, winter_offpeak,
     ev_super_offpeak, ev_on_peak,
-    export_regime, source_scenario, notes
+    export_regime, eec_multiplier, notes
 """
 
 from __future__ import annotations
@@ -49,201 +54,154 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src import config
+from src import ev_tou_schedules as evtou
 
 
-# Approximate residential customer counts (FERC Form 1, 2024).
-RESIDENTIAL_CUSTOMERS = {"pge": 5_500_000, "sce": 4_590_000, "sdge": 1_450_000}
-
-# Average residential billing-peak kW per customer (back-of-envelope from
-# CA_baseline_tmy_metadata_and_annual_results - mean of summer/winter
-# peak kW across IOU population). Used to approximate DC revenue.
-AVG_PEAK_KW_PER_CUSTOMER = {"pge": 5.0, "sce": 5.5, "sdge": 4.8}
-
-# Annual residential kWh per customer (Total_Revenue / Vol_Avg / N).
-# Computed in main() rather than hardcoded.
-
-CANONICAL_8 = [
-    # The paper's 8 (2 actual tariff + 6 designed). Designed subset:
-    "F0_WF0_ROE0",       # status quo
-    "F0_WF0_ROE1.0",     # ROE-only reduction
-    "F50_WF0_ROE0",      # 50% fixed, no wildfire removal
-    "F50_WF1_ROE0",      # 50% fixed + wildfire socialized
-    "F100_WF0_ROE0",     # full fixed
-    "F100_WF1_ROE0",     # full fixed + wildfire socialized
-]
-# "ACTUAL_TARIFF_*" tags injected per utility from the actual TOU schedule
-# (see calculate_TOU_rates*.ipynb in parent repo).
-
+# -----------------------------------------------------------------------------
+# Parent reader
+# -----------------------------------------------------------------------------
 
 def load_base_scenarios(utility: str) -> pd.DataFrame:
-    """Load the 40 fresh designed scenarios for a utility."""
+    """Load the 40 designed scenarios for a utility from the parent."""
     path = config.CR_ROOT / f"rate_scenarios_{utility}_fresh.csv"
-    df = pd.read_csv(path)
-    return df
+    return pd.read_csv(path)
 
 
-def to_extended_schema(df: pd.DataFrame, utility: str) -> pd.DataFrame:
-    """Re-emit existing scenarios in the extended schema."""
-    out = pd.DataFrame()
-    out["scenario_id"] = df["Scenario"]
+def to_extended_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Re-emit parent's scenarios in the extended schema.
+
+    Fixed_CARE and Fixed_NonCARE are renamed to fixed_monthly_care and
+    fixed_monthly_non_care so downstream code is tier-aware. All TOU
+    columns and scenario metadata pass through unchanged.
+    """
+    out = df.copy()
+    out = out.rename(columns={
+        "Scenario": "scenario_id",
+        "Fixed_CARE": "fixed_monthly_care",
+        "Fixed_NonCARE": "fixed_monthly_non_care",
+    })
     out["rate_type"] = "designed_tou"
-    out["source_scenario"] = df["Scenario"]
-    out["fixed_monthly_dollars"] = compute_fixed_monthly(df, utility)
-    out["demand_charge_per_kw_mo"] = 0.0
-    out["peak_window"] = ""
-    for col in ("summer_peak", "summer_midpeak", "summer_offpeak",
-                "winter_peak", "winter_midpeak", "winter_offpeak"):
-        out[col] = df[col] if col in df.columns else np.nan
+    out["source_scenario"] = out["scenario_id"]
     out["ev_super_offpeak"] = np.nan
     out["ev_on_peak"] = np.nan
-    out["export_regime"] = "nbt_hourly"  # default for new adopters
-    out["notes"] = "Existing designed scenario, unchanged"
+    out["export_regime"] = "nbt_hourly"
+    out["eec_multiplier"] = 1.0
+    out["notes"] = "Designed scenario from parent rate_designer; unmodified"
     return out
 
 
-def compute_fixed_monthly(df: pd.DataFrame, utility: str) -> pd.Series:
-    """Convert Fixed_NonCARE (revenue-share) to $/mo per customer.
+# -----------------------------------------------------------------------------
+# EE-specific extra rows (EV-TOU + NBT overlays)
+# -----------------------------------------------------------------------------
 
-    Fixed_NonCARE in the source is the share of T&D recovered as a fixed
-    charge. Here we approximate $/mo = (share x T&D revenue) / 12 / N_customers.
-    Without separate T&D vs generation split readily available, we use
-    Fixed_NonCARE x Total_Revenue x ~0.45 (T&D fraction) / 12 / N as a
-    rough conversion; refined later when we wire to the bill simulator.
+def add_ev_only_tou_row(utility: str) -> pd.DataFrame:
+    """Single EV-TOU row for one utility. Returns an empty frame if
+    the utility's schedule isn't populated yet.
+
+    Rates are blended summer + winter at day-of-year shares and weekday
+    + weekend at the CA workday share, so a single average per period
+    appears in the rate-extended CSV. For high-fidelity per-(season,
+    day) rates, bundle_economics calls ev_tou_schedules directly.
     """
-    n_cust = RESIDENTIAL_CUSTOMERS[utility]
-    td_share = 0.45  # rough; revisit when wiring to bill simulator
-    fixed_dollars = (
-        df["Fixed_NonCARE"] * df["Total_Revenue"] * td_share / 12 / n_cust)
-    return fixed_dollars.round(2)
-
-
-def add_demand_charge_scenarios(
-    base: pd.DataFrame, utility: str
-) -> pd.DataFrame:
-    """Build DC_5, DC_15 scenarios: $/kW-mo on monthly billing peak,
-    with volumetric rates reduced to keep total revenue neutral.
-    """
-    ref = base[base["Scenario"] == "F0_WF0_ROE0"].iloc[0]
-    avg_peak_kw = AVG_PEAK_KW_PER_CUSTOMER[utility]
-    n_cust = RESIDENTIAL_CUSTOMERS[utility]
-    annual_kwh_total = ref["Total_Revenue"] / ref["Vol_Avg"]
-
-    rows = []
-    for dc, label in [(5.0, "DC_5"), (15.0, "DC_15")]:
-        # Annual DC revenue = customers * peak_kw * dc * 12
-        dc_rev = n_cust * avg_peak_kw * dc * 12
-        # Remaining revenue must come from volumetric
-        vol_rev = ref["Total_Revenue"] - dc_rev
-        new_vol_avg = vol_rev / annual_kwh_total
-        # Scale TOU prices proportionally
-        scale = new_vol_avg / ref["Vol_Avg"]
-        row = {
-            "scenario_id": label,
-            "rate_type": "demand_charge",
-            "source_scenario": "F0_WF0_ROE0",
-            "fixed_monthly_dollars": 0.0,
-            "demand_charge_per_kw_mo": dc,
-            "peak_window": "monthly_max",
-            "summer_peak":     ref.get("summer_peak", np.nan) * scale,
-            "summer_midpeak":  ref.get("summer_midpeak", np.nan) * scale,
-            "summer_offpeak":  ref.get("summer_offpeak", np.nan) * scale,
-            "winter_peak":     ref.get("winter_peak", np.nan) * scale,
-            "winter_midpeak":  ref.get("winter_midpeak", np.nan) * scale,
-            "winter_offpeak":  ref.get("winter_offpeak", np.nan) * scale,
-            "ev_super_offpeak": np.nan,
-            "ev_on_peak":       np.nan,
-            "export_regime":   "nbt_hourly",
-            "notes": (f"DC = ${dc}/kW-mo; volumetric scaled "
-                      f"x{scale:.3f} for revenue neutrality"),
-        }
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def add_ev_only_tou_scenario() -> pd.DataFrame:
-    """EV-only TOU: applies to submetered EV load only.
-
-    Standard CA EV-TOU example: PGE EV2-A summer rates ~$0.18 super
-    off-peak (00:00-15:00), $0.55 peak (16:00-21:00), $0.36 off-peak
-    elsewhere. Use as proxy across utilities; refine per utility filings.
-    """
+    if utility not in evtou.populated_utilities():
+        return pd.DataFrame()
+    sched = evtou.EV_TOU_SCHEDULES[utility]
+    period_rates: dict[str, float] = {}
+    total_weight = 0.0
+    for key, periods in sched["schedules"].items():
+        season, day_type = key.split("_")
+        day_weight = (evtou.WORKDAY_SHARE if day_type == "weekday"
+                      else evtou.WEEKEND_HOLIDAY_SHARE)
+        if sched["season_split"]:
+            s_share, w_share = evtou._summer_winter_day_shares(utility)
+            season_weight = s_share if season == "summer" else w_share
+        else:
+            season_weight = 1.0
+        w = day_weight * season_weight
+        total_weight += w
+        for p in periods:
+            period_rates[p["name"]] = (
+                period_rates.get(p["name"], 0.0) + w * p["rate"])
+    if total_weight > 0:
+        period_rates = {k: v / total_weight for k, v in period_rates.items()}
+    rates_sorted = sorted(period_rates.items(), key=lambda kv: kv[1])
+    ev_super_offpeak = rates_sorted[0][1] if rates_sorted else np.nan
+    ev_on_peak = rates_sorted[-1][1] if rates_sorted else np.nan
     return pd.DataFrame([{
-        "scenario_id": "EV_TOU",
+        "scenario_id": f"EV_TOU_{utility.upper()}",
         "rate_type": "ev_submetered_tou",
-        "source_scenario": "PGE_EV2A_proxy",
-        "fixed_monthly_dollars": 0.0,
-        "demand_charge_per_kw_mo": 0.0,
-        "peak_window": "16:00-21:00",
-        "summer_peak":     0.55,
-        "summer_midpeak":  0.36,
-        "summer_offpeak":  0.18,
-        "winter_peak":     0.49,
-        "winter_midpeak":  0.34,
-        "winter_offpeak":  0.18,
-        "ev_super_offpeak": 0.18,
-        "ev_on_peak":       0.55,
-        "export_regime":   "nbt_hourly",
-        "notes": ("EV submetered tariff. Applies to EV load only; rest of "
-                  "household billed on base rate."),
+        "source_scenario": f"{utility}_{sched['tariff_name']}",
+        "Fixed_Pct_TD":    np.nan,
+        "Remove_Wildfire": np.nan,
+        "ROE_Reduction":   np.nan,
+        # EV-TOU is parallel submetered; BSC enters via base rate
+        "fixed_monthly_care":      0.0,
+        "fixed_monthly_non_care":  0.0,
+        "summer_peak":     period_rates.get("on_peak", np.nan),
+        "summer_midpeak":  period_rates.get("mid_peak", np.nan),
+        "summer_offpeak":  period_rates.get("off_peak", np.nan),
+        "winter_peak":     period_rates.get("on_peak", np.nan),
+        "winter_midpeak":  period_rates.get("mid_peak", np.nan),
+        "winter_offpeak":  period_rates.get("off_peak", np.nan),
+        "ev_super_offpeak": ev_super_offpeak,
+        "ev_on_peak":       ev_on_peak,
+        "export_regime":    "nbt_hourly",
+        "eec_multiplier":   1.0,
+        "notes": (f"{sched['tariff_name']} blended workday/weekend, "
+                  f"summer/winter at day-of-year shares; volumetric "
+                  f"only, BSC excluded. Use ev_tou_schedules."
+                  f"effective_price_under_profile() for high-"
+                  f"fidelity per-(season, day) lookups."),
     }])
 
 
-def add_export_regime_scenarios() -> pd.DataFrame:
-    """Export regimes are overlays on top of any import tariff.
-
-    Scaled-NBT variants represent CPUC-softening counterfactuals: the
-    base hourly EEC values are scaled by the regime's multiplier when
-    bundle_economics is run with --eec-multiplier (default 1.0, picks
-    up nbt_hourly). Downstream code reads the multiplier directly;
-    these rows document the regime names and serve as labels for
-    figure-grouping. NEM 2.0 retail / flat 5c / flat 15c removed in
-    May 2026: NEM 2.0 is grandfathered out (not a forward-looking
-    regime), and flat rates aren't policy-relevant.
+def add_export_regime_overlays() -> pd.DataFrame:
+    """Overlay rows for NBT scaling sensitivity. Carry an eec_multiplier
+    that bundle_economics --eec-multiplier applies at runtime.
     """
     rows = []
     for regime, mult, note in [
         ("nbt_hourly",      1.00,
-         "Default for new interconnections (post 4/15/2023); EEC hourly"),
+         "Status quo NBT for new interconnections (post 4/15/2023)"),
         ("nbt_scaled_125",  1.25,
-         "CPUC softening sensitivity: hourly EEC x 1.25"),
+         "Sensitivity: CPUC softens NBT, hourly EEC x 1.25"),
         ("nbt_scaled_150",  1.50,
-         "CPUC softening sensitivity: hourly EEC x 1.50"),
+         "Sensitivity: CPUC softens NBT, hourly EEC x 1.50"),
     ]:
         rows.append({
             "scenario_id": f"EXPORT_{regime.upper()}",
             "rate_type": "export_overlay",
             "source_scenario": "any",
-            "fixed_monthly_dollars": np.nan,
-            "demand_charge_per_kw_mo": np.nan,
-            "peak_window": "",
-            "summer_peak": np.nan, "summer_midpeak": np.nan,
-            "summer_offpeak": np.nan,
-            "winter_peak": np.nan, "winter_midpeak": np.nan,
-            "winter_offpeak": np.nan,
-            "ev_super_offpeak": np.nan, "ev_on_peak": np.nan,
-            "export_regime": regime,
-            "eec_multiplier": mult,
+            "Fixed_Pct_TD":    np.nan,
+            "Remove_Wildfire": np.nan,
+            "ROE_Reduction":   np.nan,
+            "fixed_monthly_care":     np.nan,
+            "fixed_monthly_non_care": np.nan,
+            "summer_peak":     np.nan, "summer_midpeak":  np.nan,
+            "summer_offpeak":  np.nan,
+            "winter_peak":     np.nan, "winter_midpeak":  np.nan,
+            "winter_offpeak":  np.nan,
+            "ev_super_offpeak": np.nan, "ev_on_peak":     np.nan,
+            "export_regime":   regime,
+            "eec_multiplier":  mult,
             "notes": note,
         })
     return pd.DataFrame(rows)
 
 
-def build_extended(utility: str, include_demand_charges: bool = False
-                   ) -> pd.DataFrame:
-    """Build the extended rate-scenarios table.
+# -----------------------------------------------------------------------------
+# Build
+# -----------------------------------------------------------------------------
 
-    include_demand_charges defaults False: DC_5 / DC_15 are parked for a
-    follow-up paper focused on residential demand charges + electrification
-    compatibility. Set True to include them (e.g. for ad-hoc sensitivity).
-    """
+def build_extended(utility: str) -> pd.DataFrame:
+    """Combine parent's designed scenarios + this utility's EV-TOU +
+    export overlays."""
     base = load_base_scenarios(utility)
     parts = [
-        to_extended_schema(base, utility),
-        add_ev_only_tou_scenario(),
-        add_export_regime_scenarios(),
+        to_extended_schema(base),
+        add_ev_only_tou_row(utility),
+        add_export_regime_overlays(),
     ]
-    if include_demand_charges:
-        parts.insert(1, add_demand_charge_scenarios(base, utility))
     return pd.concat(parts, ignore_index=True)
 
 
@@ -252,27 +210,21 @@ def main():
     ap.add_argument("--utilities", nargs="+",
                     default=list(config.INCLUDED_UTILITIES))
     ap.add_argument("--out-dir", default=str(config.DATA_DIR))
-    ap.add_argument("--include-demand-charges", action="store_true",
-                    help="Include DC_5 / DC_15 hypothetical residential "
-                         "demand-charge variants. Off by default (parked "
-                         "for follow-up paper).")
     args = ap.parse_args()
 
     out_dir = config.assert_safe_out_dir(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for u in args.utilities:
-        df = build_extended(
-            u, include_demand_charges=args.include_demand_charges)
+        df = build_extended(u)
         path = out_dir / f"rate_scenarios_extended_{u}.csv"
         df.to_csv(path, index=False)
         n_designed = (df["rate_type"] == "designed_tou").sum()
-        n_dc = (df["rate_type"] == "demand_charge").sum()
         n_ev = (df["rate_type"] == "ev_submetered_tou").sum()
         n_exp = (df["rate_type"] == "export_overlay").sum()
         print(f"{u}: {len(df)} rows  "
-              f"({n_designed} designed + {n_dc} DC + {n_ev} EV-TOU "
-              f"+ {n_exp} export overlay) -> {path}")
+              f"({n_designed} designed + {n_ev} EV-TOU + {n_exp} overlay) "
+              f"-> {path}")
 
 
 if __name__ == "__main__":

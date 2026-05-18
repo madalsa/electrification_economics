@@ -76,6 +76,23 @@ BUNDLES = (
 )
 
 
+# CARE eligibility proxy. CARE is technically <=200% FPL adjusted by
+# household size; ami_frac <= 0.80 is a defensible AMI-based proxy that
+# matches the binary tier the parent rate designer outputs
+# (Fixed_CARE / Fixed_NonCARE). FERA (200-250% FPL) is treated as
+# Non-CARE per paper scope (see paper/methods.md sec 13.x).
+CARE_AMI_THRESHOLD = 0.80
+
+
+def is_care_eligible(bldg: pd.Series) -> bool:
+    """True if this household qualifies for CARE pricing under the
+    proxy ami_frac <= 0.80. Default Non-CARE for unknown income."""
+    ami = bldg.get("ami_frac")
+    if ami is None or pd.isna(ami):
+        return False
+    return float(ami) <= CARE_AMI_THRESHOLD
+
+
 def parse_bundle(bundle: str) -> tuple[bool, bool, bool]:
     """Return (has_pv_bat, has_ev, has_hp) flags for a bundle name."""
     if bundle == "none":
@@ -413,13 +430,20 @@ def build_bundles_for_utility(
 
     rows = []
     for _, b in bldgs.iterrows():
+        is_care = is_care_eligible(b)
+        tier = "CARE" if is_care else "Non-CARE"
+        fixed_col = ("fixed_monthly_care" if is_care
+                     else "fixed_monthly_non_care")
         baseline_load = so.split_annual_kwh_by_tou(b["annual_kwh"], tou_w)
         avg_peak_kw = float(b.get("summer_peak_kw") or 5.0)
         for _, r in rate_rows.iterrows():
             prices = so.get_period_prices(r, list(tou_w.keys()))
             if not prices:
                 continue
-            fixed_monthly = float(r.get("fixed_monthly_dollars") or 0.0)
+            # Tier-specific fixed charge from the rate sheet. The parent
+            # rate designer enforces revenue neutrality at the population
+            # level under the (Fixed_CARE, Fixed_NonCARE) tiering.
+            fixed_monthly = float(r.get(fixed_col) or 0.0)
             dc = float(r.get("demand_charge_per_kw_mo") or 0.0)
             for bundle in bundles:
                 rec = evaluate_bundle(
@@ -430,8 +454,13 @@ def build_bundles_for_utility(
                     "utility": utility,
                     "bldg_id": b.get("bldg_id"),
                     "cec_cz": b.get("cec_cz"),
+                    "ami_frac": b.get("ami_frac"),
+                    "tier": tier,
                     "rate_id": r["scenario_id"],
                     "rate_type": r["rate_type"],
+                    "Fixed_Pct_TD": r.get("Fixed_Pct_TD"),
+                    "Remove_Wildfire": r.get("Remove_Wildfire"),
+                    "ROE_Reduction": r.get("ROE_Reduction"),
                     "cluster_weight": b.get("cluster_weight", 1.0),
                 })
                 rows.append(rec)

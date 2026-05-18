@@ -9,10 +9,17 @@ local clone.
 """
 
 from pathlib import Path
+import os
 
-CR_ROOT = Path(__file__).resolve().parents[2]
 EE_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = EE_ROOT / "data"
+
+# Parent pipeline inputs (rate sheets, TOU weights, EEC hourly, metadata
+# parquets, etc.) Default: EE_ROOT itself (standalone layout where the
+# rate sheets sit alongside the EE folder). Override via env var
+# EE_PARENT_DIR when EE is embedded inside the california_rates repo
+# (historical layout, where parent files live one directory up).
+CR_ROOT = Path(os.environ.get("EE_PARENT_DIR", str(EE_ROOT)))
 
 PIPELINE_OUTPUTS = {
     "pge": {

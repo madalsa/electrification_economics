@@ -113,30 +113,58 @@ missing optional columns and to zero-kWh inputs.
 **Source:** `src/rate_designer_extended.py`
 **Output:** `data/rate_scenarios_extended_<utility>.csv`
 
-The parent `california_rates` pipeline produces 40 designed rate
-scenarios per utility along three policy axes: fixed-charge share
-(`Fixed_NonCARE` ∈ {0%, 50%, 100%}), wildfire-cost socialization
-(`Remove_Wildfire` ∈ {0, 1}), and ROE reduction
-(`ROE_Reduction` ∈ {0, 1.0}). The paper's canonical-6 subset is:
+This stage is a **thin reader over the parent `california_rates` rate
+designer's outputs**. The rate design itself — including benchmarking,
+revenue-neutralization, and income-graduated fixed-charge calibration —
+is owned by the parent rate designer and not re-derived in EE. The
+parent emits 40 scenarios per utility along three policy axes:
 
-| ID | Description |
-|---|---|
-| F0_WF0_ROE0     | Status quo (pre-IGFC baseline) |
-| F0_WF0_ROE1.0   | ROE-only reduction |
-| F50_WF0_ROE0    | 50% fixed-charge transition |
-| F50_WF1_ROE0    | 50% fixed + wildfire socialized |
-| F100_WF0_ROE0   | Full fixed-charge transition |
-| F100_WF1_ROE0   | Full fixed + wildfire socialized |
+| Axis | Levels | What it varies |
+|---|---|---|
+| `Fixed_Pct_TD` | 0, 25, 50, 75, 100 (%) | Share of T&D revenue recovered as a fixed charge under AB 205 IGFC |
+| `Remove_Wildfire` | False, True | Whether wildfire cost is removed from residential volumetric and socialized elsewhere |
+| `ROE_Reduction` | 0, 0.5, 1.0, 1.5 (pp) | Magnitude of utility return-on-equity reduction |
 
-Stage 1 re-emits all 40 in the extended schema and **augments** the
-rate space with:
+Total: 5 × 2 × 4 = 40 scenarios, named `F{0,25,50,75,100}_WF{0,1}_ROE{0,0.5,1.0,1.5}`.
 
-- **EV-only TOU** opt-in tariff(s) (`EV_TOU`) — per-utility analogues of
-  PGE EV2-A / SCE TOU-EV-9-PRIME / SDGE EV-TOU-5. Applies to submetered
-  EV load only; the rest of the household stays on its base rate. These
-  are parallel opt-in tariffs whose revenue requirement is handled by
-  the utility's own filing for that customer class — they are NOT
-  revenue-neutralized against the canonical-6 set.
+**Tier-graduated fixed charges.** Each scenario carries two fixed
+charges in $/month — `Fixed_CARE` for CARE-eligible customers
+(≤200% FPL; ami_frac ≤ 0.80 proxy) and `Fixed_NonCARE` for
+everyone else. EE renames these to `fixed_monthly_care` and
+`fixed_monthly_non_care` and routes them tier-specifically at
+bundle evaluation time. **FERA (200-250% FPL, narrow band) is treated
+as Non-CARE for this paper's scope.**
+
+**Concrete progression from the parent's PGE sheet:**
+
+| Scenario | Fixed_CARE | Fixed_NonCARE | summer_peak |
+|---|---|---|---|
+| F0_WF0_ROE0 | $0 | $0 | $0.5894 |
+| F25_WF0_ROE0 | $11.26 | $45.40 | $0.5138 |
+| F50_WF0_ROE0 | $22.52 | $90.80 | $0.4382 |
+| F100_WF0_ROE0 | $45.04 | $181.61 | $0.2871 |
+
+Note that the actual *implemented* IGFC under AB 205 (~$24/mo
+Non-CARE for each IOU) sits **below F25** in this coordinate system —
+F25 through F100 are *more aggressive than what was actually adopted*.
+This is the analytical question the paper asks: how much further would
+CPUC need to push on F / WF / ROE to recover the personal-NPV gap
+opened by federal repeal (OBBB)?
+
+**EE-specific extras appended to the rate-extended CSV:**
+
+- **EV-only TOU** opt-in tariff (one row per utility): PGE EV2-A,
+  SCE TOU-D-PRIME, SDGE EV-TOU-5. Applies to submetered EV load only;
+  the rest of the household stays on its base rate. These are parallel
+  opt-in tariffs whose revenue requirement is set by the utility's own
+  filing for that customer class — they are **not** revenue-neutralized
+  against the 40-scenario rate space. The rate-extended CSV row carries
+  a season-blended approximation of period rates; `bundle_economics`
+  uses the higher-fidelity per-(season, day_type) lookups from
+  `src/ev_tou_schedules.py`. The EV-TOU module also documents each
+  utility's Base Services Charge (IGFC) tier structure for reference,
+  though that charge enters the household bill via the base residential
+  rate row, not the EV-TOU row.
 - **NBT export-regime overlays** (`EXPORT_NBT_HOURLY`,
   `EXPORT_NBT_SCALED_125`, `EXPORT_NBT_SCALED_150`). NBT hourly is the
   current law for new interconnections (post April 15, 2023); the
@@ -145,25 +173,25 @@ rate space with:
   `bundle_economics --eec-multiplier` applies at runtime to the
   annual-average EEC.
 
-**Explicitly out of scope for this paper's headline rate set:**
+**Explicitly out of scope for this paper's rate set:**
 
-- *Residential demand charges* (`DC_5`, `DC_15`). These are parked in
-  the module (set `--include-demand-charges` to restore) for a follow-up
-  paper focused on residential demand charges + electrification
-  compatibility. Reasons: (i) residential DC is not currently on the
-  CPUC table in CA, (ii) this pipeline takes load shape as fixed and so
-  doesn't capture the shape-change goal that motivates DC, and (iii)
-  Borenstein's existing peak-demand work argues residential DC is
-  regressive without behavioral response, which the future paper would
-  engage directly. Listed in §13.
-- *NEM 2.0 retail / flat 5c / flat 15c counterfactuals* — removed.
-  NEM 2.0 is grandfathered out and abstract flat-rate scenarios aren't
+- *Residential demand charges* (`DC_5`, `DC_15`). Function preserved
+  behind `--include-demand-charges` for a follow-up paper focused on
+  residential demand charges + electrification compatibility (the
+  Borenstein peak-demand-charge angle). Reasons: (i) residential DC is
+  not currently on the CPUC table in CA, (ii) this pipeline takes load
+  shape as fixed and so doesn't capture the shape-change goal that
+  motivates DC. Listed in §13.
+- *NEM 2.0 retail / flat 5¢ / flat 15¢ counterfactuals* — removed.
+  NEM 2.0 is grandfathered out and abstract flat rates aren't
   policy-relevant. The NBT-scaled overlays span the realistic
   CPUC-action envelope.
 - *Wholesale / FERC 2222 / CAISO DLAP export comp* — listed in §13 as
-  future work. Tractable data path exists (CAISO OASIS DLAP hourly)
-  but requires more careful treatment of aggregator economics and is
-  scoped out of this paper.
+  future work.
+- *Per-customer-class revenue neutrality* — the canonical-40 scenarios
+  are revenue-neutral at the utility-population level (as the parent
+  rate designer enforces), but not separately within each AMI tier.
+  See §13.
 
 Extended schema columns:
 

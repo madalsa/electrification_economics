@@ -23,14 +23,16 @@ pipeline runs.
 1. **How big is the OBBB gap?**  For each archetype × bundle, what is
    the 2024-counterfactual NPV under status-quo rate minus the 2026
    NPV under status-quo rate?
-2. **How much of the gap can rate reform close?**  Among the
-   canonical-6 CPUC rate-reform scenarios (F0/F50/F100 × WF0/WF1 ×
-   ROE0/ROE1, all revenue-neutral), what is the maximum NPV recovery
+2. **How much of the gap can rate reform close?**  Among the 40
+   designed scenarios (F ∈ {0,25,50,75,100} × WF ∈ {0,1} ×
+   ROE ∈ {0, 0.5, 1.0, 1.5}, all revenue-neutral and income-graduated
+   at the CARE / Non-CARE tier level), what is the maximum NPV recovery
    under the 2026 capex stack?
 3. **Is rate design a first-order or second-order lever?**  For each
-   (archetype × bundle), what is the spread of NPV across the
-   canonical-6 rate scenarios — both in absolute dollars and as a
-   share of total NPV magnitude?
+   (archetype × bundle), what is the spread of NPV across the 40
+   rate scenarios — both in absolute dollars and as a share of total
+   NPV magnitude? Also: does spread differ across CARE vs Non-CARE
+   households?
 4. **Where does NPV come from?**  Bundle-by-bundle decomposition of
    NPV into (a) rate-independent fuel-avoidance (gas, gasoline),
    (b) rate-dependent electric-bill changes (PV self-cons + storage
@@ -47,9 +49,12 @@ See `paper/methods.md` for the full pipeline description. Headline:
   households. Represented by ~1,500 medoid archetypes (stratified
   k-means on 11 features incl. load-shape proxies) with population
   weights from ResStock CA × PUMA-utility mapping.
-- **Rates:** canonical-6 designed-TOU + per-utility EV-TOU opt-in +
-  NBT-scaled overlay sensitivity (×1.0 / ×1.25 / ×1.50). All
-  canonical-6 are revenue-neutral by construction.
+- **Rates:** the parent `rate_designer.py`'s 40-scenario sweep (per
+  utility) of (Fixed_Pct_TD × Remove_Wildfire × ROE_Reduction), each
+  revenue-neutral and tier-graduated (CARE / Non-CARE) by construction.
+  EE consumes these verbatim and appends one per-utility EV-TOU opt-in
+  row plus three NBT-scaled overlay sensitivities (×1.0 / ×1.25 /
+  ×1.50). No rate-derivation logic lives in EE.
 - **Bundles:** 8 combinations (none, pv_bat, ev, hp, pv_bat_ev,
   pv_bat_hp, ev_hp, pv_bat_ev_hp). PV+battery is re-sized to the
   bundle's *expanded* load (captures PV-EV / PV-HP synergy).
@@ -69,11 +74,12 @@ See `paper/methods.md` for the full pipeline description. Headline:
 1. **NPV-gap map.** Per archetype × bundle, color = 2024-counterfactual
    NPV minus 2026-base NPV (status-quo rate). What did OBBB cost each
    profile?
-2. **Rate-reform recovery.** Per archetype × bundle: best canonical-6
-   NPV minus status-quo NPV under 2026 capex. What can CPUC do?
-3. **Rate-design alpha.** Distribution of NPV spread across the 6
-   rates, per bundle. Headline single number per bundle for the
-   abstract.
+2. **Rate-reform recovery.** Per archetype × bundle: best NPV across
+   the 40 designed scenarios minus status-quo NPV under 2026 capex.
+   What can CPUC do?
+3. **Rate-design alpha.** Distribution of NPV spread across the 40
+   rates, per bundle, split by CARE vs Non-CARE tier. Headline single
+   number per bundle for the abstract.
 4. **Source-of-NPV decomposition.** Per bundle, stacked bar of (gas
    avoided + gasoline avoided + electric-bill net) − capex. Shows
    which lever moves how much.
@@ -93,7 +99,7 @@ See `paper/methods.md` for the full pipeline description. Headline:
   arithmetic for CPUC commissioners considering how aggressive to be
   on F / WF / ROE. If rate reform recovers 60% of the OBBB gap for
   the median household, that is materially different from 10%.
-- **Equity:** identifies customer profiles for whom *no* canonical-6
+- **Equity:** identifies customer profiles for whom *no* scenario in the 40-rate sweep
   rate restores 2024-with-subsidies NPV. These are the households for
   whom federal-policy reversal cannot be remedied at the rate-design
   layer.
@@ -140,7 +146,7 @@ See `paper/methods.md` for the full pipeline description. Headline:
   scope here.
 - *Does not* model dynamic / real-time pricing.
 - *Does not* enforce per-customer-class revenue neutrality
-  (canonical-6 are utility-population-neutral, which is the standard
+  (the 40 scenarios are utility-population-neutral, which is the standard
   rate-design criterion; per-class would be a different paper).
 - *Does not* model behavioral demand response to any rate. Load shape
   is taken as fixed at the ResStock baseline. The paper measures
