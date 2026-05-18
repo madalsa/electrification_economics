@@ -10,13 +10,24 @@ import pandas as pd
 from src import rate_designer_extended as rde, config
 
 
-def test_build_extended_pge_has_all_categories():
+def test_build_extended_default_categories():
+    """Default build (no --include-demand-charges) should have three
+    rate categories: designed_tou, ev_submetered_tou, export_overlay."""
     df = rde.build_extended("pge")
     types = set(df["rate_type"].unique())
     assert "designed_tou" in types
-    assert "demand_charge" in types
     assert "ev_submetered_tou" in types
     assert "export_overlay" in types
+    # DC is parked for follow-up paper; must not appear by default
+    assert "demand_charge" not in types
+
+
+def test_build_extended_include_dc_flag():
+    """--include-demand-charges restores DC_5 / DC_15."""
+    df = rde.build_extended("pge", include_demand_charges=True)
+    types = set(df["rate_type"].unique())
+    assert "demand_charge" in types
+    assert {"DC_5", "DC_15"}.issubset(set(df["scenario_id"]))
 
 
 def test_designed_count_matches_source():
@@ -27,10 +38,10 @@ def test_designed_count_matches_source():
     assert n_designed == len(src)
 
 
-def test_dc_volumetric_lower_than_base():
+def test_dc_volumetric_lower_than_base_when_included():
     """DC scenarios fund part of revenue via demand charge, so volumetric
     must be lower than the F0_WF0_ROE0 base."""
-    df = rde.build_extended("sce")
+    df = rde.build_extended("sce", include_demand_charges=True)
     base = pd.read_csv(config.CR_ROOT / "rate_scenarios_sce_fresh.csv")
     base_summer_peak = base[base["Scenario"] == "F0_WF0_ROE0"]["summer_peak"].iloc[0]
     for dc_id in ("DC_5", "DC_15"):
@@ -38,26 +49,39 @@ def test_dc_volumetric_lower_than_base():
         assert dc_row["summer_peak"] < base_summer_peak
 
 
-def test_dc_revenue_lowers_with_higher_dc():
-    df = rde.build_extended("pge")
+def test_dc_revenue_lowers_with_higher_dc_when_included():
+    df = rde.build_extended("pge", include_demand_charges=True)
     dc5 = df[df["scenario_id"] == "DC_5"].iloc[0]
     dc15 = df[df["scenario_id"] == "DC_15"].iloc[0]
     assert dc15["summer_peak"] < dc5["summer_peak"]
 
 
 def test_ev_tou_super_offpeak_lower_than_peak():
-    df = rde.build_extended("pge")
-    ev = df[df["scenario_id"] == "EV_TOU"].iloc[0]
+    """Pure-Python check, no parent files needed."""
+    df = rde.add_ev_only_tou_scenario()
+    ev = df.iloc[0]
     assert ev["ev_super_offpeak"] < ev["ev_on_peak"]
-    assert ev["ev_super_offpeak"] == 0.18
-    assert ev["ev_on_peak"] == 0.55
 
 
-def test_export_regimes_present():
-    df = rde.build_extended("sdge")
-    regimes = set(
-        df[df["rate_type"] == "export_overlay"]["export_regime"])
-    assert {"nbt_hourly", "nem2_retail", "flat_5c", "flat_15c"} <= regimes
+def test_export_regimes_are_nbt_family():
+    """Post-May-2026: export regimes drop NEM2 / flat counterfactuals
+    and add NBT-scaled CPUC-softening sensitivities. No parent files."""
+    df = rde.add_export_regime_scenarios()
+    regimes = set(df["export_regime"])
+    assert regimes == {"nbt_hourly", "nbt_scaled_125", "nbt_scaled_150"}, regimes
+    # Removed regimes must not silently re-appear
+    assert "nem2_retail" not in regimes
+    assert "flat_5c" not in regimes
+    assert "flat_15c" not in regimes
+
+
+def test_export_overlay_multipliers_match_names():
+    """Multipliers must match the suffix in the regime name. No parent files."""
+    df = rde.add_export_regime_scenarios()
+    by_regime = df.set_index("export_regime")["eec_multiplier"]
+    assert by_regime.loc["nbt_hourly"] == 1.0
+    assert by_regime.loc["nbt_scaled_125"] == 1.25
+    assert by_regime.loc["nbt_scaled_150"] == 1.50
 
 
 if __name__ == "__main__":

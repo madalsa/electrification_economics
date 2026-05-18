@@ -386,7 +386,11 @@ def build_bundles_for_utility(
     gas_price: float = config.GAS_PRICE_DEFAULT,
     vehicle_class: str = "crossover",
     bundles: tuple[str, ...] = BUNDLES,
+    eec_multiplier: float = 1.0,
 ) -> pd.DataFrame:
+    """eec_multiplier scales the annual-average export compensation; use
+    1.25 / 1.50 to exercise the EXPORT_NBT_SCALED_* overlay scenarios
+    (CPUC softening sensitivity). 1.0 is current NBT (default)."""
     bldgs = buildings[buildings["utility"].str.lower() == utility].copy()
     bldgs = u11.project_upgrade11_annual(bldgs)
     if "annual_kwh" not in bldgs.columns:
@@ -394,7 +398,7 @@ def build_bundles_for_utility(
             "out.electricity.total.energy_consumption.kwh"].astype(float)
 
     tou_w = so.load_tou_weights(utility)
-    eec = config.EEC_ANNUAL_AVG[utility]
+    eec = config.EEC_ANNUAL_AVG[utility] * eec_multiplier
     rate_rows = rates[rates["rate_type"].isin(
         ("designed_tou", "demand_charge"))]
 
@@ -477,6 +481,11 @@ def main():
                     default=config.GAS_PRICE_DEFAULT)
     ap.add_argument("--vehicle", default="crossover",
                     choices=list(config.EV_EFFICIENCY.keys()))
+    ap.add_argument("--eec-multiplier", type=float, default=1.0,
+                    help="Scale annual-average EEC export comp by this "
+                         "factor. 1.0 = current NBT (default). "
+                         "1.25 / 1.50 exercise the EXPORT_NBT_SCALED_125 "
+                         "/ _150 CPUC-softening sensitivities.")
     ap.add_argument("--out-dir", default=str(config.DATA_DIR))
     args = ap.parse_args()
 
@@ -504,7 +513,8 @@ def main():
         df = build_bundles_for_utility(
             u, u_b, rates,
             ev_scenario=args.ev_scenario, vmt=args.vmt,
-            gas_price=args.gas_price, vehicle_class=args.vehicle)
+            gas_price=args.gas_price, vehicle_class=args.vehicle,
+            eec_multiplier=args.eec_multiplier)
         path = out_dir / f"bundle_economics_{u}.parquet"
         df.to_parquet(path, index=False)
         print(f"  {len(df):,} rows -> {path}")

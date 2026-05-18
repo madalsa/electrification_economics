@@ -1,25 +1,33 @@
-"""Extend the rate-design space with new rate types.
+"""Extend the rate-design space with rates relevant to the paper.
 
-The existing pipeline produces 40 designed scenarios per utility along
-three axes (Fixed_Pct_TD, Remove_Wildfire, ROE_Reduction). The paper
-narrowed those to 8 (2 actual + 6 designed). For the personal-economics
-paper we ADD rate types the existing schema doesn't cover:
-
-  Demand-charge variants (DC):
-    - DC_5:    $5/kW-mo on monthly billing peak
-    - DC_15:  $15/kW-mo
+The existing parent pipeline produces 40 designed scenarios per utility
+along three policy axes (Fixed_Pct_TD, Remove_Wildfire, ROE_Reduction).
+The paper's canonical-6 subset of those is the headline rate-reform set
+(see CANONICAL_8 below). For the personal-economics paper we ADD:
 
   EV-only TOU (separate submetered tariff):
-    - EV_TOU:  super-off-peak overnight $0.18 / on-peak peak $0.55
+    - EV_TOU:  super-off-peak overnight / on-peak 4-9pm
+    TODO: replace single proxy with per-utility rows (PGE EV2-A,
+    SCE TOU-EV-9-PRIME, SDGE EV-TOU-5) once 2026 rate sheets verified.
 
-  Export-regime variants (modeled as overlay, not re-priced import):
-    - EXPORT_NBT_HOURLY:    default for new interconnections (CPUC NBT)
-    - EXPORT_NEM2_RETAIL:   grandfathered customers (full retail)
-    - EXPORT_FLAT_5C:       low-counterfactual
-    - EXPORT_FLAT_15C:      raised-NBT counterfactual
+  Export-regime overlays (modeled as overlay, not re-priced import):
+    - EXPORT_NBT_HOURLY:     default for new interconnections (CPUC NBT)
+    - EXPORT_NBT_SCALED_125: NBT softened by 25% (CPUC adjustment scenario)
+    - EXPORT_NBT_SCALED_150: NBT softened by 50% (more aggressive softening)
 
 The existing 40 scenarios cover the fixed-charge / wildfire / ROE space;
 we re-emit them in the extended schema but unchanged.
+
+Removed from the default flow (kept in module for future paper / option):
+  - DC_5 / DC_15 demand-charge variants. Residential DC is not currently
+    on the CPUC table in CA and our pipeline doesn't model behavioral
+    response to the price signal, so DC scenarios would be misleading
+    as a headline rate-reform comparator. The functions
+    add_demand_charge_scenarios remains in the module for a future paper
+    focused on residential DC + electrification compatibility (the
+    Borenstein peak-demand angle).
+  - NEM 2.0 retail export, flat 5c / 15c counterfactuals. NEM 2.0 is
+    grandfathered out and abstract flat rates aren't policy-relevant.
 
 OUTPUT: rate_scenarios_extended_<utility>.csv with extended schema:
     scenario_id, rate_type, fixed_monthly_dollars,
@@ -28,20 +36,6 @@ OUTPUT: rate_scenarios_extended_<utility>.csv with extended schema:
     winter_peak, winter_midpeak, winter_offpeak,
     ev_super_offpeak, ev_on_peak,
     export_regime, source_scenario, notes
-
-Revenue-neutrality calibration:
-    For DC_*: a $/kW-mo charge generates revenue D * sum(monthly_peaks).
-    We approximate average residential monthly peak kW per customer from
-    annual results (summer/winter peak kW) and adjust the volumetric rate
-    so total revenue matches the F0_WF0_ROE0 base.
-
-    For EV_TOU: applies only to EV submetered load - no calibration
-    needed (the rest of the household stays on the base rate).
-
-    Export regimes don't change import revenue, only export credit.
-
-Calibration is approximate; downstream bill simulator validates by
-re-running on representative buildings.
 """
 
 from __future__ import annotations
@@ -197,15 +191,23 @@ def add_ev_only_tou_scenario() -> pd.DataFrame:
 def add_export_regime_scenarios() -> pd.DataFrame:
     """Export regimes are overlays on top of any import tariff.
 
-    These rows are placeholders that downstream code combines with an
-    import scenario when computing bills - they don't stand alone.
+    Scaled-NBT variants represent CPUC-softening counterfactuals: the
+    base hourly EEC values are scaled by the regime's multiplier when
+    bundle_economics is run with --eec-multiplier (default 1.0, picks
+    up nbt_hourly). Downstream code reads the multiplier directly;
+    these rows document the regime names and serve as labels for
+    figure-grouping. NEM 2.0 retail / flat 5c / flat 15c removed in
+    May 2026: NEM 2.0 is grandfathered out (not a forward-looking
+    regime), and flat rates aren't policy-relevant.
     """
     rows = []
-    for regime, note in [
-        ("nbt_hourly",   "Default for new interconnections (post 4/15/2023)"),
-        ("nem2_retail",  "Grandfathered NEM 2.0 customers - full retail"),
-        ("flat_5c",      "Counterfactual: NBT lowered to $0.05/kWh flat"),
-        ("flat_15c",     "Counterfactual: NBT raised to $0.15/kWh flat"),
+    for regime, mult, note in [
+        ("nbt_hourly",      1.00,
+         "Default for new interconnections (post 4/15/2023); EEC hourly"),
+        ("nbt_scaled_125",  1.25,
+         "CPUC softening sensitivity: hourly EEC x 1.25"),
+        ("nbt_scaled_150",  1.50,
+         "CPUC softening sensitivity: hourly EEC x 1.50"),
     ]:
         rows.append({
             "scenario_id": f"EXPORT_{regime.upper()}",
@@ -220,19 +222,28 @@ def add_export_regime_scenarios() -> pd.DataFrame:
             "winter_offpeak": np.nan,
             "ev_super_offpeak": np.nan, "ev_on_peak": np.nan,
             "export_regime": regime,
+            "eec_multiplier": mult,
             "notes": note,
         })
     return pd.DataFrame(rows)
 
 
-def build_extended(utility: str) -> pd.DataFrame:
+def build_extended(utility: str, include_demand_charges: bool = False
+                   ) -> pd.DataFrame:
+    """Build the extended rate-scenarios table.
+
+    include_demand_charges defaults False: DC_5 / DC_15 are parked for a
+    follow-up paper focused on residential demand charges + electrification
+    compatibility. Set True to include them (e.g. for ad-hoc sensitivity).
+    """
     base = load_base_scenarios(utility)
     parts = [
         to_extended_schema(base, utility),
-        add_demand_charge_scenarios(base, utility),
         add_ev_only_tou_scenario(),
         add_export_regime_scenarios(),
     ]
+    if include_demand_charges:
+        parts.insert(1, add_demand_charge_scenarios(base, utility))
     return pd.concat(parts, ignore_index=True)
 
 
@@ -241,13 +252,18 @@ def main():
     ap.add_argument("--utilities", nargs="+",
                     default=list(config.INCLUDED_UTILITIES))
     ap.add_argument("--out-dir", default=str(config.DATA_DIR))
+    ap.add_argument("--include-demand-charges", action="store_true",
+                    help="Include DC_5 / DC_15 hypothetical residential "
+                         "demand-charge variants. Off by default (parked "
+                         "for follow-up paper).")
     args = ap.parse_args()
 
     out_dir = config.assert_safe_out_dir(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for u in args.utilities:
-        df = build_extended(u)
+        df = build_extended(
+            u, include_demand_charges=args.include_demand_charges)
         path = out_dir / f"rate_scenarios_extended_{u}.csv"
         df.to_csv(path, index=False)
         n_designed = (df["rate_type"] == "designed_tou").sum()

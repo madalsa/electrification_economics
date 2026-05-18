@@ -131,16 +131,39 @@ scenarios per utility along three policy axes: fixed-charge share
 Stage 1 re-emits all 40 in the extended schema and **augments** the
 rate space with:
 
-- Two **demand-charge** variants (`DC_5`, `DC_15` at $5 and $15 / kW-mo
-  on monthly peak), with volumetric rates scaled down by the calibrated
-  share so total revenue matches `F0_WF0_ROE0`.
-- One **EV-only TOU** scenario (`EV_TOU`) modeled on PGE EV2-A:
-  $0.18 super-offpeak / $0.55 on-peak. Applies to submetered EV load
-  only; rest of household stays on its base rate.
-- Four **export-regime overlays** (`EXPORT_NBT_HOURLY`,
-  `EXPORT_NEM2_RETAIL`, `EXPORT_FLAT_5C`, `EXPORT_FLAT_15C`) — rows
-  that downstream code combines with import tariffs at bill time;
-  they don't stand alone.
+- **EV-only TOU** opt-in tariff(s) (`EV_TOU`) — per-utility analogues of
+  PGE EV2-A / SCE TOU-EV-9-PRIME / SDGE EV-TOU-5. Applies to submetered
+  EV load only; the rest of the household stays on its base rate. These
+  are parallel opt-in tariffs whose revenue requirement is handled by
+  the utility's own filing for that customer class — they are NOT
+  revenue-neutralized against the canonical-6 set.
+- **NBT export-regime overlays** (`EXPORT_NBT_HOURLY`,
+  `EXPORT_NBT_SCALED_125`, `EXPORT_NBT_SCALED_150`). NBT hourly is the
+  current law for new interconnections (post April 15, 2023); the
+  scaled variants are CPUC-softening sensitivities. Each carries an
+  `eec_multiplier` column (1.0 / 1.25 / 1.50) that
+  `bundle_economics --eec-multiplier` applies at runtime to the
+  annual-average EEC.
+
+**Explicitly out of scope for this paper's headline rate set:**
+
+- *Residential demand charges* (`DC_5`, `DC_15`). These are parked in
+  the module (set `--include-demand-charges` to restore) for a follow-up
+  paper focused on residential demand charges + electrification
+  compatibility. Reasons: (i) residential DC is not currently on the
+  CPUC table in CA, (ii) this pipeline takes load shape as fixed and so
+  doesn't capture the shape-change goal that motivates DC, and (iii)
+  Borenstein's existing peak-demand work argues residential DC is
+  regressive without behavioral response, which the future paper would
+  engage directly. Listed in §13.
+- *NEM 2.0 retail / flat 5c / flat 15c counterfactuals* — removed.
+  NEM 2.0 is grandfathered out and abstract flat-rate scenarios aren't
+  policy-relevant. The NBT-scaled overlays span the realistic
+  CPUC-action envelope.
+- *Wholesale / FERC 2222 / CAISO DLAP export comp* — listed in §13 as
+  future work. Tractable data path exists (CAISO OASIS DLAP hourly)
+  but requires more careful treatment of aggregator economics and is
+  scoped out of this paper.
 
 Extended schema columns:
 
@@ -506,3 +529,88 @@ Headline analytical outputs for the paper (post-stage-5):
   alternative gas prices × therm prices, computed analytically.
 
 These are the inputs for the paper's three central figures.
+
+---
+
+## 13. Out of scope / future work
+
+The pipeline is deliberately bounded to questions the current
+implementation can answer credibly. The four extensions below are
+plausible follow-up papers; each is signposted here so a reviewer
+sees what's been left out *on purpose*.
+
+### 13.1 Residential demand charges + electrification compatibility
+
+The DC_5 / DC_15 scenarios remain in `rate_designer_extended.py`
+behind an `--include-demand-charges` flag. The follow-up paper asks
+whether residential demand charges — proposed but not yet adopted in
+CA, in force in AZ and HI — are compatible with electrification
+without behavioral response. Adding an EV charger spikes monthly peak
+by 7-10 kW; under DC_15 that's ~$1,260/yr in incremental demand
+charges, comparable to or larger than the EV's fuel savings under
+many TOU tariffs. The Borenstein peak-demand-charge literature
+(Borenstein 2016 *EJ*; Borenstein, Fowlie, Sallee 2021 NBER) argues
+DC is regressive without behavioral response. Engaging that argument
+directly requires:
+
+  (a) a behavioral-response model for monthly peak under DC pricing,
+      parametric across customer types (load factor, smart-load
+      penetration, battery availability),
+  (b) a proper per-customer revenue-neutrality check (rather than the
+      population-level proxy the current calibration uses),
+  (c) coupling the household battery dispatch model (we have the LP)
+      to a DC objective so the battery shaves monthly peak.
+
+Out of scope for this paper because the headline (rate reform under
+post-OBBB capex) doesn't need it.
+
+### 13.2 Wholesale / FERC Order 2222 / DLAP export compensation
+
+Replacing the EEC hourly file with CAISO DLAP wholesale prices would
+answer "what if DER export went to pure wholesale via aggregator
+participation under FERC 2222." Tractable on the data side (CAISO
+OASIS API, ~1 GB/yr × 3 DLAPs, hourly). Out of scope because:
+
+  (a) the household's compensation depends on aggregator economics
+      that aren't publicly observable (privately negotiated fee
+      structures, performance penalty exposure), so modeling
+      household DER value under FERC 2222 requires more assumptions
+      than the data alone supports;
+  (b) the NBT-scaled overlays (×1.25, ×1.50) already span the
+      realistic CPUC-action envelope for this paper.
+
+The DLAP path is right for a paper about aggregator participation
+specifically; it's not needed for a paper about CPUC-level rate
+reform.
+
+### 13.3 Dynamic / real-time pricing (RTP)
+
+CAISO has proposed and piloted RTP variants. A household on RTP sees
+hourly-changing prices, which interacts strongly with PV/battery
+dispatch. The pipeline could be extended to RTP via the same hourly
+LP path used for sizing_optimizer_hourly. Out of scope because:
+
+  (a) household RTP isn't a CPUC-table proposal at the residential
+      level in CA in 2026,
+  (b) modeling RTP rigorously would require a household-response
+      assumption (do they read the prices? respond automatically?),
+      which puts the analysis in the same parametric territory as DC.
+
+### 13.4 Per-customer revenue-neutrality and bill-impact tests
+
+The canonical-6 rates are revenue-neutral at the population level by
+construction in the parent rate designer, but per-customer bill
+impacts vary widely (a low-usage household pays more under high
+fixed charge; a high-usage household pays less, or vice versa
+depending on volumetric). The paper reports archetype-level NPVs but
+does not enforce per-customer-class revenue neutrality. A follow-up
+could:
+
+  (a) decompose bill impacts by AMI tier × CZ to show who bears the
+      revenue shift in each rate move,
+  (b) compute counterfactual rates that hold per-AMI-tier revenue
+      neutral (rather than population total), as a contrast against
+      the existing utility-level neutrality.
+
+Useful for an equity-focused paper; not needed for the rate-reform
+question we're answering here.
