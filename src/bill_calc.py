@@ -246,6 +246,41 @@ def compute_baseline_credit(
 
 
 # -----------------------------------------------------------------------------
+# Hourly load loader (reads parent Baseline_<U>/ parquets)
+# -----------------------------------------------------------------------------
+
+BASELINE_PARQUET_COL = "out.electricity.total.energy_consumption"
+
+
+def load_hourly_baseline_load(utility: str, bldg_id: int
+                              ) -> np.ndarray | None:
+    """Load 8,760-hr baseline load profile from Baseline_<U>/.
+
+    Convention from parent pipeline: parquets named
+    `<bldg_id>-<suffix>.parquet`, with the user's *_baseline_bills.py
+    using `<bldg_id>-0.parquet`. Column
+    `out.electricity.total.energy_consumption` is 15-min interval (35,040
+    rows); summed every 4 rows to yield 8,760 hourly kWh values.
+
+    Returns None if (a) the Baseline_<U>/ directory isn't present (lets
+    callers skip gracefully when running EE without the ~21 GB of parent
+    hourly data), (b) no parquet matches the bldg_id, or (c) the load
+    column is missing from the parquet.
+    """
+    base = config.utility_paths(utility)["baseline_parquets"]
+    if base is None or not base.exists():
+        return None
+    matches = list(base.glob(f"{bldg_id}-*.parquet"))
+    if not matches:
+        return None
+    df = pd.read_parquet(matches[0])
+    if BASELINE_PARQUET_COL not in df.columns:
+        return None
+    load_15min = df[BASELINE_PARQUET_COL].values
+    return load_15min.reshape(-1, 4).sum(axis=1)
+
+
+# -----------------------------------------------------------------------------
 # Annual bill calculator
 # -----------------------------------------------------------------------------
 

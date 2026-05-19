@@ -335,6 +335,80 @@ def test_load_retail_data_sdge_pulls_real_values():
     assert math.isclose(rd["care_discount"], 0.37, abs_tol=0.001)
 
 
+# ============================================================================
+# Hourly load loader (Stage 1)
+# ============================================================================
+
+def test_load_hourly_returns_none_when_baseline_dir_missing(tmp_path,
+                                                             monkeypatch):
+    """If Baseline_<U>/ folder isn't present, loader returns None
+    (so callers can skip gracefully without the parent hourly data)."""
+    from src import config
+    monkeypatch.setattr(
+        config, "PIPELINE_OUTPUTS",
+        {**config.PIPELINE_OUTPUTS,
+         "pge": {**config.PIPELINE_OUTPUTS["pge"],
+                 "baseline_parquets": tmp_path / "nonexistent_dir"}})
+    assert bc.load_hourly_baseline_load("pge", 12345) is None
+
+
+def test_load_hourly_returns_none_when_no_matching_parquet(tmp_path,
+                                                            monkeypatch):
+    """Directory exists but no matching <bldg_id>-*.parquet -> None."""
+    from src import config
+    base = tmp_path / "Baseline_PGE"
+    base.mkdir()
+    (base / "99999-0.parquet").touch()  # an unrelated parquet
+    monkeypatch.setattr(
+        config, "PIPELINE_OUTPUTS",
+        {**config.PIPELINE_OUTPUTS,
+         "pge": {**config.PIPELINE_OUTPUTS["pge"],
+                 "baseline_parquets": base}})
+    assert bc.load_hourly_baseline_load("pge", 12345) is None
+
+
+def test_load_hourly_aggregates_15min_to_8760(tmp_path, monkeypatch):
+    """Builds a synthetic 35040-row parquet and verifies the loader
+    sums every 4 rows to produce an 8760-array."""
+    from src import config
+    base = tmp_path / "Baseline_PGE"
+    base.mkdir()
+    fake = pd.DataFrame({
+        bc.BASELINE_PARQUET_COL: np.full(35040, 0.25),  # 0.25 kWh / 15-min
+    })
+    fake.to_parquet(base / "42-0.parquet")
+    monkeypatch.setattr(
+        config, "PIPELINE_OUTPUTS",
+        {**config.PIPELINE_OUTPUTS,
+         "pge": {**config.PIPELINE_OUTPUTS["pge"],
+                 "baseline_parquets": base}})
+    out = bc.load_hourly_baseline_load("pge", 42)
+    assert out is not None
+    assert out.shape == (8760,)
+    # Each hour: 4 × 0.25 = 1.0 kWh
+    assert np.allclose(out, 1.0)
+
+
+def test_load_hourly_returns_none_when_column_missing(tmp_path, monkeypatch):
+    from src import config
+    base = tmp_path / "Baseline_PGE"
+    base.mkdir()
+    pd.DataFrame({"some_other_col": np.zeros(100)}).to_parquet(
+        base / "7-0.parquet")
+    monkeypatch.setattr(
+        config, "PIPELINE_OUTPUTS",
+        {**config.PIPELINE_OUTPUTS,
+         "pge": {**config.PIPELINE_OUTPUTS["pge"],
+                 "baseline_parquets": base}})
+    assert bc.load_hourly_baseline_load("pge", 7) is None
+
+
+def test_sizing_optimizer_hourly_reuses_same_loader():
+    """sizing_optimizer_hourly re-exports the same function (DRY)."""
+    from src import sizing_optimizer_hourly as soh
+    assert soh.load_hourly_load is bc.load_hourly_baseline_load
+
+
 def test_real_pge_scenario_bill_sane_order_of_magnitude():
     """Sanity check: F0_WF0_ROE0 with 6000 kWh/yr typical load should
     produce a plausible annual bill (a few thousand $)."""

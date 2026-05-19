@@ -121,24 +121,10 @@ def battery_lp_dispatch_param(
     }
 
 
-def load_hourly_load(utility: str, bldg_id: int) -> np.ndarray | None:
-    """Load 8,760-hr profile from Baseline_<utility>/. None if not found.
-
-    Convention: parquets named <bldg_id>-<...>.parquet, with column
-    `out.electricity.total.energy_consumption` at 15-min interval.
-    """
-    base = config.utility_paths(utility)["baseline_parquets"]
-    if base is None or not base.exists():
-        return None
-    matches = list(base.glob(f"{bldg_id}-*.parquet"))
-    if not matches:
-        return None
-    df = pd.read_parquet(matches[0])
-    col = "out.electricity.total.energy_consumption"
-    if col not in df.columns:
-        return None
-    load_15min = df[col].values
-    return load_15min.reshape(-1, 4).sum(axis=1)
+# Hourly load loader extracted to bill_calc.load_hourly_baseline_load
+# (single source of truth shared with bundle_economics). Re-exported
+# here for backward compatibility with existing import sites.
+from src.bill_calc import load_hourly_baseline_load as load_hourly_load
 
 
 def load_eec_hourly(utility: str) -> np.ndarray:
