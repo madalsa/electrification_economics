@@ -361,6 +361,59 @@ def ev_hourly_load(annual_ev_kwh: float,
 
 
 # -----------------------------------------------------------------------------
+# Expanded-hourly-load assembly (composition of all bundle components)
+# -----------------------------------------------------------------------------
+
+def assemble_bundle_hourly_load(
+    baseline_load: np.ndarray,
+    ev_load: np.ndarray | None = None,
+    hp_delta: np.ndarray | None = None,
+    pv_gen: np.ndarray | None = None,
+    battery_net: np.ndarray | None = None,
+) -> np.ndarray:
+    """Compose the household's signed hourly grid load under one bundle.
+
+        net[h] = baseline[h]
+               + (ev_load[h]      if EV in bundle)
+               + (hp_delta[h]     if HP in bundle)
+               - (pv_gen[h]       if PV in bundle)
+               + (battery_net[h]  if battery in bundle)
+
+    All inputs are 8,760-hour kWh-per-hour arrays.
+
+    Sign of the returned array:
+        +  = grid import at that hour (household pulls from grid)
+        -  = grid export at that hour (PV/battery sends back)
+    The downstream bill calc splits this into import (priced at retail
+    TOU rate) and export (compensated at the hourly EEC).
+
+    Sign convention for `battery_net` per sizing_optimizer_hourly
+    convention: positive = battery drawing from grid (increases import),
+    negative = battery discharging to household (decreases import).
+    Pass None for any component the bundle doesn't include.
+
+    Raises ValueError if any non-None input is the wrong shape.
+    """
+    if baseline_load.shape != (8760,):
+        raise ValueError(
+            f"baseline_load shape (8760,) expected, got {baseline_load.shape}")
+    net = np.array(baseline_load, dtype=float, copy=True)
+    for name, component, sign in (
+        ("ev_load", ev_load, +1),
+        ("hp_delta", hp_delta, +1),
+        ("pv_gen", pv_gen, -1),
+        ("battery_net", battery_net, +1),
+    ):
+        if component is None:
+            continue
+        if component.shape != (8760,):
+            raise ValueError(
+                f"{name} shape (8760,) expected, got {component.shape}")
+        net = net + sign * np.asarray(component, dtype=float)
+    return net
+
+
+# -----------------------------------------------------------------------------
 # Annual bill calculator
 # -----------------------------------------------------------------------------
 

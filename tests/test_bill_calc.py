@@ -574,6 +574,122 @@ def test_ev_hourly_load_zero_annual_returns_zeros():
     assert np.all(out == 0.0)
 
 
+# ============================================================================
+# Expanded-hourly-load assembly (Stage 4)
+# ============================================================================
+
+def test_assemble_baseline_only_returns_baseline_unchanged():
+    baseline = np.ones(8760) * 0.5
+    out = bc.assemble_bundle_hourly_load(baseline)
+    assert out.shape == (8760,)
+    assert np.allclose(out, 0.5)
+
+
+def test_assemble_returns_a_copy_not_the_input():
+    """Caller shouldn't accidentally mutate the baseline array."""
+    baseline = np.ones(8760) * 1.0
+    out = bc.assemble_bundle_hourly_load(baseline)
+    out[0] = 999.0
+    assert baseline[0] == 1.0
+
+
+def test_assemble_ev_adds_to_baseline():
+    baseline = np.ones(8760) * 0.5
+    ev = np.ones(8760) * 0.2
+    out = bc.assemble_bundle_hourly_load(baseline, ev_load=ev)
+    assert np.allclose(out, 0.7)
+
+
+def test_assemble_hp_delta_adds_to_baseline():
+    baseline = np.ones(8760) * 0.5
+    hp = np.full(8760, 0.3)
+    out = bc.assemble_bundle_hourly_load(baseline, hp_delta=hp)
+    assert np.allclose(out, 0.8)
+
+
+def test_assemble_pv_subtracts_from_baseline():
+    baseline = np.ones(8760) * 0.5
+    pv = np.ones(8760) * 0.2
+    out = bc.assemble_bundle_hourly_load(baseline, pv_gen=pv)
+    assert np.allclose(out, 0.3)
+
+
+def test_assemble_full_bundle_composition():
+    """Full bundle: net = baseline + ev + hp - pv + battery"""
+    baseline = np.ones(8760) * 1.0
+    ev = np.ones(8760) * 0.3
+    hp = np.ones(8760) * 0.2
+    pv = np.ones(8760) * 0.7
+    batt = np.ones(8760) * 0.1
+    out = bc.assemble_bundle_hourly_load(
+        baseline, ev_load=ev, hp_delta=hp, pv_gen=pv, battery_net=batt)
+    # 1.0 + 0.3 + 0.2 - 0.7 + 0.1 = 0.9
+    assert np.allclose(out, 0.9)
+
+
+def test_assemble_can_go_negative_when_pv_exceeds_load():
+    """When PV gen exceeds load at an hour, net load is negative
+    (i.e. household is exporting to grid)."""
+    baseline = np.zeros(8760)
+    baseline[12] = 1.0
+    pv = np.zeros(8760)
+    pv[12] = 5.0  # solar surplus at noon
+    out = bc.assemble_bundle_hourly_load(baseline, pv_gen=pv)
+    assert out[12] == -4.0
+
+
+def test_assemble_battery_net_positive_increases_import():
+    """battery_net > 0 means battery is charging from the grid; net
+    grid import goes up."""
+    baseline = np.ones(8760) * 0.5
+    batt = np.zeros(8760)
+    batt[2] = 1.0  # battery charging at 2am
+    out = bc.assemble_bundle_hourly_load(baseline, battery_net=batt)
+    assert out[2] == 1.5
+
+
+def test_assemble_battery_net_negative_reduces_import():
+    """battery_net < 0 means battery is discharging to household;
+    net grid import goes down."""
+    baseline = np.ones(8760) * 1.0
+    batt = np.zeros(8760)
+    batt[18] = -0.8  # battery discharging at 6pm
+    out = bc.assemble_bundle_hourly_load(baseline, battery_net=batt)
+    assert math.isclose(out[18], 0.2, abs_tol=1e-9)
+
+
+def test_assemble_rejects_wrong_shape_baseline():
+    try:
+        bc.assemble_bundle_hourly_load(np.zeros(100))
+    except ValueError as exc:
+        assert "8760" in str(exc) and "baseline" in str(exc)
+        return
+    raise AssertionError("expected ValueError for wrong baseline shape")
+
+
+def test_assemble_rejects_wrong_shape_component():
+    """If a non-None component isn't shape (8760,), raise."""
+    try:
+        bc.assemble_bundle_hourly_load(
+            np.zeros(8760), ev_load=np.zeros(100))
+    except ValueError as exc:
+        assert "8760" in str(exc) and "ev_load" in str(exc)
+        return
+    raise AssertionError("expected ValueError for wrong ev shape")
+
+
+def test_assemble_linearity():
+    """net = baseline + sum(signed components) — linearity sanity."""
+    baseline = np.linspace(0, 1, 8760)
+    ev = np.linspace(0, 0.5, 8760)
+    hp = np.linspace(0, 0.3, 8760)
+    pv = np.linspace(0, 0.8, 8760)
+    expected = baseline + ev + hp - pv
+    out = bc.assemble_bundle_hourly_load(
+        baseline, ev_load=ev, hp_delta=hp, pv_gen=pv)
+    assert np.allclose(out, expected)
+
+
 def test_real_pge_scenario_bill_sane_order_of_magnitude():
     """Sanity check: F0_WF0_ROE0 with 6000 kWh/yr typical load should
     produce a plausible annual bill (a few thousand $)."""
