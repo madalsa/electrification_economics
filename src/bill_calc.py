@@ -169,6 +169,47 @@ def build_hourly_rate_array(rate_scenario: pd.Series, utility: str
 _RETAIL_CACHE: dict[str, dict] = {}
 
 
+# -----------------------------------------------------------------------------
+# Hourly EEC loader (NBT export compensation)
+# -----------------------------------------------------------------------------
+
+# eec_hourly_2025_wide.csv has columns: datetime, pge_total, sce_total,
+# sdge_total (plus per-utility produced/delivered split that we don't
+# need at the household level — the `_total` column is the bundled
+# NBT EEC the household sees).
+EEC_TOTAL_COL = {
+    "pge":  "pge_total",
+    "sce":  "sce_total",
+    "sdge": "sdge_total",
+}
+
+_EEC_CACHE: dict[str, np.ndarray] = {}
+
+
+def load_hourly_eec(utility: str) -> np.ndarray:
+    """Load 8,760-hr hourly NBT export-comp ($/kWh) for `utility`.
+
+    Reads eec_hourly_2025_wide.csv and returns the `<utility>_total`
+    column (bundled produced + delivered NBT EEC, in $/kWh) as a
+    numpy array of length 8760. Cached after first call per utility.
+    """
+    if utility in _EEC_CACHE:
+        return _EEC_CACHE[utility]
+    col = EEC_TOTAL_COL.get(utility)
+    if col is None:
+        raise ValueError(
+            f"no EEC column known for utility {utility!r}; "
+            f"expected one of {sorted(EEC_TOTAL_COL)}")
+    path = config.CR_ROOT / "eec_hourly_2025_wide.csv"
+    df = pd.read_csv(path, usecols=[col])
+    arr = df[col].values.astype(float)
+    if arr.shape != (8760,):
+        raise ValueError(
+            f"{path.name}: {col} has length {len(arr)}, expected 8760")
+    _EEC_CACHE[utility] = arr
+    return arr
+
+
 def load_retail_data(utility: str) -> dict:
     """Load and cache retail-rate metadata for `utility`.
 
@@ -418,41 +459,70 @@ def assemble_bundle_hourly_load(
 # -----------------------------------------------------------------------------
 
 def compute_annual_bill(
-    hourly_load: np.ndarray,
+    hourly_net_load: np.ndarray,
     rate_scenario: pd.Series,
     income_category: str,
     puma_str: str,
     utility: str,
+    eec_hourly: np.ndarray | None = None,
     retail_data: dict | None = None,
 ) -> float:
-    """Annual bill in $ for one household under one rate scenario.
+    """Annual $ bill for one household under one rate scenario.
 
-    hourly_load    : shape (8760,) kWh per hour
+    hourly_net_load: shape (8760,) signed kWh-per-hour. Positive values
+                     are grid imports (priced at the rate-scenario's
+                     hourly TOU rate); negative values are grid exports
+                     (compensated at `eec_hourly` if provided, otherwise
+                     uncompensated). For a baseline household with no PV
+                     this is identical to positive-only hourly load.
     rate_scenario  : row from rate_scenarios_extended_<u>.csv with period
                      prices and fixed_monthly_care / fixed_monthly_non_care
     income_category: 'Low' / 'Medium' / 'High' (CARE if 'Low')
     puma_str       : G06000xxx-style PUMA string (matches baseline_df['puma'])
     utility        : 'pge' / 'sce' / 'sdge'
+    eec_hourly     : shape (8760,) $/kWh export comp; pass None for
+                     bundles without PV/battery (no exports possible).
+                     Use load_hourly_eec(utility) to get current NBT.
     retail_data    : output of load_retail_data(utility); auto-loaded if None
 
-    Returns total annual $ bill (volumetric + fixed, after baseline
-    credit and CARE discount).
+    Bill formula (matches pge_baseline_bills.py methodology, extended
+    to handle exports):
+      grid_in   = max(hourly_net_load, 0)              # imports
+      grid_out  = max(-hourly_net_load, 0)             # exports
+      vol_bill  = sum(grid_in * hourly_rate) - baseline_credit(grid_in)
+      if is_care: vol_bill *= (1 - care_discount)
+      export_credit = sum(grid_out * eec_hourly)       # if eec provided
+      fixed = (fixed_monthly_care if is_care
+               else fixed_monthly_non_care) * 12
+      total = vol_bill + fixed - export_credit
+
+    Baseline credit is computed on grid_in (not gross consumption)
+    because PV-served kWh aren't imported from the grid and so don't
+    qualify for the baseline (Tier 1) credit.
     """
     if retail_data is None:
         retail_data = load_retail_data(utility)
-    if hourly_load.shape != (8760,):
+    if hourly_net_load.shape != (8760,):
         raise ValueError(
-            f"hourly_load must be shape (8760,), got {hourly_load.shape}")
+            f"hourly_net_load must be shape (8760,), got "
+            f"{hourly_net_load.shape}")
+    if eec_hourly is not None and eec_hourly.shape != (8760,):
+        raise ValueError(
+            f"eec_hourly must be shape (8760,), got {eec_hourly.shape}")
 
     is_care = (str(income_category).strip().lower() == "low")
 
-    # 1. Volumetric energy charges
-    rate_array = build_hourly_rate_array(rate_scenario, utility)
-    vol_bill = float(np.dot(hourly_load, rate_array))
+    # Split signed net load into import and export legs.
+    grid_in = np.maximum(hourly_net_load, 0.0)
+    grid_out = np.maximum(-hourly_net_load, 0.0)
 
-    # 2. Baseline credit on within-allowance kWh
+    # 1. Volumetric import charges
+    rate_array = build_hourly_rate_array(rate_scenario, utility)
+    vol_bill = float(np.dot(grid_in, rate_array))
+
+    # 2. Baseline credit on within-allowance kWh of IMPORTS
     bl_credit = compute_baseline_credit(
-        hourly_load, puma_str,
+        grid_in, puma_str,
         retail_data["baseline_df"],
         retail_data["baseline_credit_rate"])
     vol_bill -= bl_credit
@@ -461,12 +531,16 @@ def compute_annual_bill(
     if is_care and retail_data["care_discount"] > 0:
         vol_bill *= (1 - retail_data["care_discount"])
 
-    # 4. Tier-specific fixed charge (already $/month from parent rate
-    # designer; multiply by 12 for annual)
+    # 4. Tier-specific fixed charge ($/month -> annual)
     if is_care:
         fixed_monthly = rate_scenario.get("fixed_monthly_care")
     else:
         fixed_monthly = rate_scenario.get("fixed_monthly_non_care")
     fixed_annual = float(fixed_monthly or 0.0) * 12
 
-    return vol_bill + fixed_annual
+    # 5. Export credit at hourly EEC (NBT pricing)
+    export_credit = 0.0
+    if eec_hourly is not None:
+        export_credit = float(np.dot(grid_out, eec_hourly))
+
+    return vol_bill + fixed_annual - export_credit

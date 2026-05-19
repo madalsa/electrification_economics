@@ -216,11 +216,11 @@ def test_zero_load_zero_vol_bill_only_fixed():
     rd = _synthetic_retail_data(care_discount=0.35)
     # Low income: fixed = $6 * 12 = $72
     assert math.isclose(
-        bc.compute_annual_bill(load, scenario, "Low", "G06000101", "pge", rd),
+        bc.compute_annual_bill(load, scenario, "Low", "G06000101", "pge", retail_data=rd),
         72.0, abs_tol=1e-6)
     # Medium income: fixed = $24 * 12 = $288
     assert math.isclose(
-        bc.compute_annual_bill(load, scenario, "Medium", "G06000101", "pge", rd),
+        bc.compute_annual_bill(load, scenario, "Medium", "G06000101", "pge", retail_data=rd),
         288.0, abs_tol=1e-6)
 
 
@@ -236,9 +236,9 @@ def test_care_volumetric_discount_applied_for_low_income():
     })
     rd = _synthetic_retail_data(care_discount=0.35)
     low_bill = bc.compute_annual_bill(
-        load, scenario, "Low", "G06000101", "pge", rd)
+        load, scenario, "Low", "G06000101", "pge", retail_data=rd)
     high_bill = bc.compute_annual_bill(
-        load, scenario, "High", "G06000101", "pge", rd)
+        load, scenario, "High", "G06000101", "pge", retail_data=rd)
     assert math.isclose(high_bill, 876.0, abs_tol=0.1)
     assert math.isclose(low_bill, 876.0 * 0.65, abs_tol=0.1)
 
@@ -253,8 +253,8 @@ def test_high_and_medium_both_pay_non_care_fixed():
         "fixed_monthly_non_care": 24.0,
     })
     rd = _synthetic_retail_data()
-    med = bc.compute_annual_bill(load, scenario, "Medium", "G06000101", "pge", rd)
-    high = bc.compute_annual_bill(load, scenario, "High", "G06000101", "pge", rd)
+    med = bc.compute_annual_bill(load, scenario, "Medium", "G06000101", "pge", retail_data=rd)
+    high = bc.compute_annual_bill(load, scenario, "High", "G06000101", "pge", retail_data=rd)
     assert med == high == 288.0
 
 
@@ -281,12 +281,12 @@ def test_full_bill_formula_matches_user_baseline_bills():
     expected_peak_hours = int(masks["summer_peak"].sum())
 
     bill_low = bc.compute_annual_bill(
-        load, scenario, "Low", "G06000101", "pge", rd)
+        load, scenario, "Low", "G06000101", "pge", retail_data=rd)
     expected_low = expected_peak_hours * 0.65 + 6.0 * 12
     assert math.isclose(bill_low, expected_low, abs_tol=1e-6)
 
     bill_high = bc.compute_annual_bill(
-        load, scenario, "High", "G06000101", "pge", rd)
+        load, scenario, "High", "G06000101", "pge", retail_data=rd)
     expected_high = expected_peak_hours + 24.0 * 12
     assert math.isclose(bill_high, expected_high, abs_tol=1e-6)
 
@@ -300,7 +300,7 @@ def test_hourly_load_shape_validated():
     rd = _synthetic_retail_data()
     try:
         bc.compute_annual_bill(
-            np.zeros(100), scenario, "Low", "G06000101", "pge", rd)
+            np.zeros(100), scenario, "Low", "G06000101", "pge", retail_data=rd)
     except ValueError as exc:
         assert "8760" in str(exc)
         return
@@ -575,6 +575,155 @@ def test_ev_hourly_load_zero_annual_returns_zeros():
 
 
 # ============================================================================
+# Signed-net-load + EEC export (Stage 5a / 5b)
+# ============================================================================
+
+def test_negative_hourly_loads_treated_as_exports():
+    """A negative hour in the net-load array represents grid export.
+    Without an eec_hourly array, exports get zero credit (matches the
+    old positive-only behavior).
+    """
+    load = np.zeros(8760)
+    load[12] = -3.0    # 3 kWh export at noon
+    scenario = pd.Series({
+        "summer_peak": 0.5, "summer_offpeak": 0.3,
+        "winter_peak": 0.4, "winter_offpeak": 0.2,
+        "fixed_monthly_care": 0.0, "fixed_monthly_non_care": 0.0,
+    })
+    rd = _synthetic_retail_data()
+    bill = bc.compute_annual_bill(
+        load, scenario, "Medium", "G06000101", "pge", retail_data=rd)
+    # No imports at all (only an export, no EEC); bill = 0
+    assert bill == 0.0
+
+
+def test_export_credit_applied_with_eec_hourly():
+    """Export credit = sum(grid_out * eec_hourly)."""
+    load = np.zeros(8760)
+    load[12] = -3.0    # 3 kWh export at noon
+    scenario = pd.Series({
+        "summer_peak": 0.5, "summer_offpeak": 0.3,
+        "winter_peak": 0.4, "winter_offpeak": 0.2,
+        "fixed_monthly_care": 0.0, "fixed_monthly_non_care": 0.0,
+    })
+    rd = _synthetic_retail_data()
+    eec = np.ones(8760) * 0.08   # flat 8c export rate
+    bill = bc.compute_annual_bill(
+        load, scenario, "Medium", "G06000101", "pge",
+        eec_hourly=eec, retail_data=rd)
+    # Export credit = 3 * 0.08 = $0.24, no fixed, no imports
+    # Bill = 0 + 0 - 0.24 = -0.24 (negative = household gets paid)
+    assert math.isclose(bill, -0.24, abs_tol=1e-9)
+
+
+def test_export_credit_uses_hour_specific_eec():
+    """EEC varies by hour; credit is sum(grid_out[h] * eec[h])."""
+    load = np.zeros(8760)
+    load[100] = -1.0
+    load[200] = -2.0
+    eec = np.zeros(8760)
+    eec[100] = 0.05
+    eec[200] = 0.15
+    scenario = pd.Series({
+        "summer_peak": 0.5, "summer_offpeak": 0.3,
+        "winter_peak": 0.4, "winter_offpeak": 0.2,
+        "fixed_monthly_care": 0.0, "fixed_monthly_non_care": 0.0,
+    })
+    rd = _synthetic_retail_data()
+    bill = bc.compute_annual_bill(
+        load, scenario, "Medium", "G06000101", "pge",
+        eec_hourly=eec, retail_data=rd)
+    # Credit = 1*0.05 + 2*0.15 = 0.35 -> bill = -0.35
+    assert math.isclose(bill, -0.35, abs_tol=1e-9)
+
+
+def test_import_export_mix():
+    """A mixed-sign hourly load: some imports, some exports."""
+    load = np.zeros(8760)
+    # Daytime export, evening import (hours pick winter so winter_peak applies)
+    load[100] = -2.0       # winter offpeak export
+    load[20] = 5.0         # Jan 1 at 8pm -> winter peak (16-21 window)
+    scenario = pd.Series({
+        "summer_peak": 0.5, "summer_offpeak": 0.3,
+        "winter_peak": 0.4, "winter_offpeak": 0.2,
+        "fixed_monthly_care": 0.0, "fixed_monthly_non_care": 0.0,
+    })
+    rd = _synthetic_retail_data()
+    eec = np.ones(8760) * 0.10
+    bill = bc.compute_annual_bill(
+        load, scenario, "Medium", "G06000101", "pge",
+        eec_hourly=eec, retail_data=rd)
+    # Import: 5 kWh * $0.40 (winter peak) = $2.00
+    # Export credit: 2 kWh * $0.10 = $0.20
+    # Net: 2.00 - 0.20 = $1.80
+    assert math.isclose(bill, 1.80, abs_tol=1e-9)
+
+
+def test_eec_hourly_shape_validated():
+    scenario = pd.Series({
+        "summer_peak": 0.5, "summer_offpeak": 0.3,
+        "winter_peak": 0.4, "winter_offpeak": 0.2,
+        "fixed_monthly_care": 0.0, "fixed_monthly_non_care": 0.0,
+    })
+    rd = _synthetic_retail_data()
+    try:
+        bc.compute_annual_bill(
+            np.zeros(8760), scenario, "Low", "G06000101", "pge",
+            eec_hourly=np.zeros(100), retail_data=rd)
+    except ValueError as exc:
+        assert "8760" in str(exc) and "eec" in str(exc).lower()
+        return
+    raise AssertionError("expected ValueError for wrong eec shape")
+
+
+def test_positive_only_load_path_unchanged():
+    """If hourly_net_load is all positive (no PV), result must equal
+    the bill we'd get without thinking about exports. Regression on the
+    pre-Stage-5 API."""
+    load = np.ones(8760) * 0.5
+    scenario = pd.Series({
+        "summer_peak": 0.10, "summer_offpeak": 0.10,
+        "winter_peak": 0.10, "winter_offpeak": 0.10,
+        "fixed_monthly_care": 6.0, "fixed_monthly_non_care": 24.0,
+    })
+    rd = _synthetic_retail_data(care_discount=0.0)
+    # 0.5 kWh/hr * 8760 = 4380 kWh; rate $0.10 -> $438 vol + $288 fixed
+    bill = bc.compute_annual_bill(
+        load, scenario, "Medium", "G06000101", "pge", retail_data=rd)
+    assert math.isclose(bill, 438.0 + 288.0, abs_tol=0.1)
+
+
+def test_load_hourly_eec_returns_8760_for_all_utilities():
+    """eec_hourly_2025_wide.csv must yield 8760-arrays per utility."""
+    for u in ("pge", "sce", "sdge"):
+        arr = bc.load_hourly_eec(u)
+        assert arr.shape == (8760,), u
+        assert arr.dtype == float, u
+
+
+def test_load_hourly_eec_pge_avg_in_expected_range():
+    """PGE NBT 2025 hourly EEC averages ~$0.10/kWh per CPUC EEC table."""
+    arr = bc.load_hourly_eec("pge")
+    assert 0.03 < arr.mean() < 0.20
+
+
+def test_load_hourly_eec_is_cached():
+    """Repeated calls return the same array object (cache hit)."""
+    a = bc.load_hourly_eec("pge")
+    b = bc.load_hourly_eec("pge")
+    assert a is b
+
+
+def test_load_hourly_eec_unknown_utility_raises():
+    try:
+        bc.load_hourly_eec("ladwp")
+    except ValueError as exc:
+        assert "ladwp" in str(exc)
+        return
+    raise AssertionError("expected ValueError for unknown utility")
+
+
+# ============================================================================
 # Expanded-hourly-load assembly (Stage 4)
 # ============================================================================
 
@@ -704,7 +853,7 @@ def test_real_pge_scenario_bill_sane_order_of_magnitude():
     sample_puma = rd["baseline_df"]["puma"].iloc[0]
     load = np.ones(8760) * (6000 / 8760)
     bill = bc.compute_annual_bill(
-        load, scenario, "Medium", sample_puma, "pge", rd)
+        load, scenario, "Medium", sample_puma, "pge", retail_data=rd)
     # Non-CARE at $0 fixed (F0) - vol only.
     # Avg rate ~$0.47/kWh * 6000 - baseline credit. Expect roughly
     # $1500-$3000 depending on PUMA allowance.
