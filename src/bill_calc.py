@@ -326,6 +326,41 @@ def _load_hourly_from_dir(parquet_dir, bldg_id: int) -> np.ndarray | None:
 
 
 # -----------------------------------------------------------------------------
+# EV hourly charging profile builder
+# -----------------------------------------------------------------------------
+
+def ev_hourly_load(annual_ev_kwh: float,
+                   profile_name: str = "smart_tou") -> np.ndarray:
+    """Build an 8,760-hour EV charging load profile in kWh.
+
+    `vmt_sensitivity.CHARGING_PROFILES[profile_name]` is a 24-hour
+    weight vector summing to 1.0 that represents the *daily* fractional
+    distribution of EV charging across hours-of-day. We tile that across
+    365 days and scale by daily_kwh = annual_ev_kwh / 365.
+
+    annual_ev_kwh is typically (VMT / EV_efficiency_mi_per_kwh) — see
+    config.EV_EFFICIENCY for the mi/kWh constants.
+
+    Total of the returned array equals annual_ev_kwh exactly.
+    """
+    # Local import to avoid circular: vmt_sensitivity imports payback_npv
+    # which doesn't import bill_calc, so this is safe; the local-import
+    # pattern is defensive.
+    from src.vmt_sensitivity import CHARGING_PROFILES
+    if profile_name not in CHARGING_PROFILES:
+        raise ValueError(
+            f"unknown EV charging profile: {profile_name!r} "
+            f"(available: {sorted(CHARGING_PROFILES)})")
+    profile_24h = np.asarray(CHARGING_PROFILES[profile_name], dtype=float)
+    if profile_24h.shape != (24,):
+        raise ValueError(
+            f"CHARGING_PROFILES[{profile_name!r}] must be shape (24,), "
+            f"got {profile_24h.shape}")
+    daily_kwh = float(annual_ev_kwh) / 365.0
+    return np.tile(profile_24h, 365) * daily_kwh
+
+
+# -----------------------------------------------------------------------------
 # Annual bill calculator
 # -----------------------------------------------------------------------------
 

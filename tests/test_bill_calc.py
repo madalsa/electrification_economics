@@ -513,6 +513,67 @@ def test_sce_upgrade11_path_configured():
     assert sce_path.name == "Upgrade11_SCE"
 
 
+# ============================================================================
+# EV hourly profile (Stage 3)
+# ============================================================================
+
+def test_ev_hourly_load_shape_is_8760():
+    out = bc.ev_hourly_load(3000.0, "smart_tou")
+    assert out.shape == (8760,)
+
+
+def test_ev_hourly_load_sum_equals_annual():
+    """Total must equal annual_ev_kwh exactly (no leakage from tiling)."""
+    for annual in (1000.0, 3636.36, 5000.0):
+        out = bc.ev_hourly_load(annual, "smart_tou")
+        assert math.isclose(out.sum(), annual, rel_tol=1e-9)
+
+
+def test_ev_hourly_load_overnight_concentrates_in_early_hours():
+    """overnight_offpeak puts 95% of charging in hours 0-6, 5% in 7-23.
+    Tile by 365 and aggregate by hour-of-day: hours 0-6 should hold 95%
+    of the total annual EV kWh."""
+    annual = 3000.0
+    out = bc.ev_hourly_load(annual, "overnight_offpeak")
+    by_hod = out.reshape(365, 24).sum(axis=0)
+    overnight_kwh = by_hod[0:7].sum()
+    rest_kwh = by_hod[7:24].sum()
+    assert math.isclose(overnight_kwh, annual * 0.95, rel_tol=1e-6)
+    assert math.isclose(rest_kwh, annual * 0.05, rel_tol=1e-6)
+
+
+def test_ev_hourly_load_opportunistic_is_flat():
+    annual = 2400.0
+    out = bc.ev_hourly_load(annual, "opportunistic")
+    expected_per_hour = annual / 8760.0
+    assert np.allclose(out, expected_per_hour, rtol=1e-9)
+
+
+def test_ev_hourly_load_smart_tou_matches_overnight():
+    """Per current proxy in vmt_sensitivity, smart_tou == overnight_offpeak.
+    If you later change CHARGING_PROFILES['smart_tou'], update this test."""
+    annual = 1000.0
+    smart = bc.ev_hourly_load(annual, "smart_tou")
+    overnight = bc.ev_hourly_load(annual, "overnight_offpeak")
+    assert np.allclose(smart, overnight)
+
+
+def test_ev_hourly_load_unknown_profile_raises():
+    try:
+        bc.ev_hourly_load(1000.0, "totally_made_up_profile")
+    except ValueError as exc:
+        assert "totally_made_up_profile" in str(exc)
+        return
+    raise AssertionError("expected ValueError for unknown profile")
+
+
+def test_ev_hourly_load_zero_annual_returns_zeros():
+    """Bundle with no EV should produce zero EV-load array."""
+    out = bc.ev_hourly_load(0.0, "smart_tou")
+    assert out.shape == (8760,)
+    assert np.all(out == 0.0)
+
+
 def test_real_pge_scenario_bill_sane_order_of_magnitude():
     """Sanity check: F0_WF0_ROE0 with 6000 kWh/yr typical load should
     produce a plausible annual bill (a few thousand $)."""
