@@ -409,6 +409,110 @@ def test_sizing_optimizer_hourly_reuses_same_loader():
     assert soh.load_hourly_load is bc.load_hourly_baseline_load
 
 
+# ============================================================================
+# Hourly Upgrade 11 loader + delta (Stage 2)
+# ============================================================================
+
+def _setup_paired_parquets(tmp_path, monkeypatch, bldg_id,
+                            baseline_kwh_per_15min,
+                            upgrade11_kwh_per_15min):
+    """Write a matched pair of Baseline / Upgrade11 parquets for one
+    building and monkeypatch config to point at them."""
+    from src import config
+    base_dir = tmp_path / "Baseline_PGE"
+    upg_dir = tmp_path / "Upgrade11_PGE"
+    base_dir.mkdir()
+    upg_dir.mkdir()
+    pd.DataFrame({
+        bc.BASELINE_PARQUET_COL: np.full(35040, baseline_kwh_per_15min),
+    }).to_parquet(base_dir / f"{bldg_id}-0.parquet")
+    pd.DataFrame({
+        bc.BASELINE_PARQUET_COL: np.full(35040, upgrade11_kwh_per_15min),
+    }).to_parquet(upg_dir / f"{bldg_id}-11.parquet")
+    monkeypatch.setattr(
+        config, "PIPELINE_OUTPUTS",
+        {**config.PIPELINE_OUTPUTS,
+         "pge": {**config.PIPELINE_OUTPUTS["pge"],
+                 "baseline_parquets": base_dir,
+                 "upgrade11_parquets": upg_dir}})
+
+
+def test_load_hourly_upgrade11_load_returns_8760(tmp_path, monkeypatch):
+    _setup_paired_parquets(tmp_path, monkeypatch, 100, 0.25, 0.5)
+    out = bc.load_hourly_upgrade11_load("pge", 100)
+    assert out is not None
+    assert out.shape == (8760,)
+    assert np.allclose(out, 2.0)   # 4 × 0.5 kWh/15min
+
+
+def test_load_hourly_upgrade11_load_returns_none_when_dir_missing(
+        tmp_path, monkeypatch):
+    from src import config
+    monkeypatch.setattr(
+        config, "PIPELINE_OUTPUTS",
+        {**config.PIPELINE_OUTPUTS,
+         "pge": {**config.PIPELINE_OUTPUTS["pge"],
+                 "upgrade11_parquets": tmp_path / "nonexistent"}})
+    assert bc.load_hourly_upgrade11_load("pge", 100) is None
+
+
+def test_load_hourly_upgrade11_load_returns_none_when_config_is_none(
+        tmp_path, monkeypatch):
+    """Older config entries set upgrade11_parquets to None directly.
+    Loader handles this without crashing."""
+    from src import config
+    monkeypatch.setattr(
+        config, "PIPELINE_OUTPUTS",
+        {**config.PIPELINE_OUTPUTS,
+         "pge": {**config.PIPELINE_OUTPUTS["pge"],
+                 "upgrade11_parquets": None}})
+    assert bc.load_hourly_upgrade11_load("pge", 100) is None
+
+
+def test_upgrade11_delta_is_upgrade_minus_baseline(tmp_path, monkeypatch):
+    """upgrade11 at 0.5 kWh/15min, baseline at 0.25 kWh/15min:
+    delta per hour = (4 × 0.5) − (4 × 0.25) = 1.0 kWh."""
+    _setup_paired_parquets(tmp_path, monkeypatch, 200, 0.25, 0.5)
+    delta = bc.load_hourly_upgrade11_delta("pge", 200)
+    assert delta is not None
+    assert delta.shape == (8760,)
+    assert np.allclose(delta, 1.0)
+
+
+def test_upgrade11_delta_zero_when_equal(tmp_path, monkeypatch):
+    """If upgrade11 == baseline at every quarter-hour, delta is zero."""
+    _setup_paired_parquets(tmp_path, monkeypatch, 300, 0.3, 0.3)
+    delta = bc.load_hourly_upgrade11_delta("pge", 300)
+    assert np.allclose(delta, 0.0)
+
+
+def test_upgrade11_delta_none_when_either_parquet_missing(
+        tmp_path, monkeypatch):
+    """If only the baseline parquet exists (no upgrade11), delta is None."""
+    from src import config
+    base = tmp_path / "Baseline_PGE"
+    base.mkdir()
+    pd.DataFrame({bc.BASELINE_PARQUET_COL: np.zeros(35040)}).to_parquet(
+        base / "400-0.parquet")
+    monkeypatch.setattr(
+        config, "PIPELINE_OUTPUTS",
+        {**config.PIPELINE_OUTPUTS,
+         "pge": {**config.PIPELINE_OUTPUTS["pge"],
+                 "baseline_parquets": base,
+                 "upgrade11_parquets": tmp_path / "no_upgrade_dir"}})
+    assert bc.load_hourly_upgrade11_delta("pge", 400) is None
+
+
+def test_sce_upgrade11_path_configured():
+    """Stage 2 also updates config.py: SCE upgrade11_parquets is no
+    longer None — it points at Upgrade11_SCE (consistent with
+    PGE / SDGE)."""
+    from src import config
+    sce_path = config.utility_paths("sce")["upgrade11_parquets"]
+    assert sce_path is not None
+    assert sce_path.name == "Upgrade11_SCE"
+
+
 def test_real_pge_scenario_bill_sane_order_of_magnitude():
     """Sanity check: F0_WF0_ROE0 with 6000 kWh/yr typical load should
     produce a plausible annual bill (a few thousand $)."""

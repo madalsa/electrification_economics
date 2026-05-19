@@ -267,10 +267,55 @@ def load_hourly_baseline_load(utility: str, bldg_id: int
     hourly data), (b) no parquet matches the bldg_id, or (c) the load
     column is missing from the parquet.
     """
-    base = config.utility_paths(utility)["baseline_parquets"]
-    if base is None or not base.exists():
+    return _load_hourly_from_dir(
+        config.utility_paths(utility)["baseline_parquets"], bldg_id)
+
+
+def load_hourly_upgrade11_load(utility: str, bldg_id: int
+                                ) -> np.ndarray | None:
+    """Load 8,760-hr POST-upgrade load profile from Upgrade11_<U>/.
+
+    Upgrade 11 = whole-home electrification (heat pump space heat +
+    HPWH + induction range; gas heating/HW/cooking removed). Same
+    parquet convention as the baseline; 15-min → hourly aggregation.
+
+    Returns None on the same three failure modes as
+    load_hourly_baseline_load.
+    """
+    return _load_hourly_from_dir(
+        config.utility_paths(utility).get("upgrade11_parquets"), bldg_id)
+
+
+def load_hourly_upgrade11_delta(utility: str, bldg_id: int
+                                 ) -> np.ndarray | None:
+    """Return 8,760-array of HP-induced hourly LOAD DELTA in kWh.
+
+        delta[h] = upgrade11_load[h] - baseline_load[h]
+
+    Positive at hours where Upgrade 11 adds net electric load (most
+    winter hours, year-round HPWH operation). Negative at hours where
+    Upgrade 11 reduces load (uncommon but possible e.g. when efficiency
+    improvements outweigh the HP/HPWH additions). Composable: a bundle's
+    expanded post-electrification load is
+        baseline_load + (ev_delta if EV) + (hp_delta if HP) - pv_gen
+        + battery_dispatch.
+
+    Returns None if either the baseline OR the upgrade11 parquet for
+    this (utility, bldg_id) can't be loaded.
+    """
+    upg = load_hourly_upgrade11_load(utility, bldg_id)
+    base = load_hourly_baseline_load(utility, bldg_id)
+    if upg is None or base is None:
         return None
-    matches = list(base.glob(f"{bldg_id}-*.parquet"))
+    return upg - base
+
+
+def _load_hourly_from_dir(parquet_dir, bldg_id: int) -> np.ndarray | None:
+    """Internal: load `<bldg_id>-*.parquet` from `parquet_dir` and
+    aggregate the 15-min total energy column to 8,760 hourly kWh."""
+    if parquet_dir is None or not parquet_dir.exists():
+        return None
+    matches = list(parquet_dir.glob(f"{bldg_id}-*.parquet"))
     if not matches:
         return None
     df = pd.read_parquet(matches[0])

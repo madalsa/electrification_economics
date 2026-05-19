@@ -38,7 +38,7 @@ PIPELINE_OUTPUTS = {
         "rate_scenarios": CR_ROOT / "rate_scenarios_sce.csv",
         "tou_weights":    CR_ROOT / "tou_weights_sce.csv",
         "baseline_parquets": CR_ROOT / "Baseline_SCE",
-        "upgrade11_parquets": None,
+        "upgrade11_parquets": CR_ROOT / "Upgrade11_SCE",
     },
     "sdge": {
         "baseline_bills": CR_ROOT / "baseline_bills_sdge_fresh.csv",
