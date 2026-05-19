@@ -53,6 +53,41 @@ AMI_BIN_TO_FRAC = {
     "Not Available": np.nan,
 }
 
+# in.income (ResStock dollar-band string) -> income_category {Low/Medium/High}.
+# Boundary at $50K matches the user's CARE proxy (low income = CARE).
+# Medium / High split at $150K matches the inc_bin breakpoints used in the
+# parent assign_technologies.py. The 140000-159999 bin falls into Medium
+# because its midpoint ($149,999.5) is just under $150K.
+# 'Not Available' defaults to Medium per the user's normalize_income default.
+INCOME_TO_CATEGORY = {
+    '<10000':         'Low',
+    '10000-14999':    'Low',
+    '15000-19999':    'Low',
+    '20000-24999':    'Low',
+    '25000-29999':    'Low',
+    '30000-34999':    'Low',
+    '35000-39999':    'Low',
+    '40000-44999':    'Low',
+    '45000-49999':    'Low',
+    '50000-59999':    'Medium',
+    '60000-69999':    'Medium',
+    '70000-79999':    'Medium',
+    '80000-99999':    'Medium',
+    '100000-119999':  'Medium',
+    '120000-139999':  'Medium',
+    '140000-159999':  'Medium',
+    '160000-179999':  'High',
+    '180000-199999':  'High',
+    '200000+':        'High',
+    'Not Available':  'Medium',
+}
+
+
+def map_income_category(income_bin) -> str:
+    """ResStock dollar-band string -> Low/Medium/High. CARE eligibility
+    proxy is income_category == 'Low'."""
+    return INCOME_TO_CATEGORY.get(str(income_bin).strip(), 'Medium')
+
 VINTAGE_DECADE = {
     "<1940": "pre1940", "1940s": "pre1960", "1950s": "pre1960",
     "1960s": "1960_70s", "1970s": "1960_70s",
@@ -86,6 +121,7 @@ def load_metadata() -> pd.DataFrame:
         "weight",
         "puma_full", "utility", "utility_type",
         "in.cec_climate_zone",
+        "in.income",           # raw ResStock dollar-band; CARE proxy via map_income_category
         "in.area_median_income", "in.federal_poverty_level",
         "in.heating_fuel", "in.geometry_building_type_recs",
         "in.vintage", "in.tenure", "in.sqft", "in.county_name",
@@ -182,6 +218,13 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["ami_bin"] = df["in.area_median_income"]
     df["building_type"] = df["in.geometry_building_type_recs"]
     df["heating_fuel"] = df["in.heating_fuel"]
+    # CARE eligibility proxy: income_category == 'Low' (<$50K from in.income).
+    # Used by bundle_economics for tier-specific fixed charge + CARE
+    # volumetric discount in the bill computation.
+    df["income_category"] = df.get(
+        "in.income", pd.Series("Not Available", index=df.index)
+    ).map(map_income_category)
+    df["is_care"] = (df["income_category"] == "Low")
     return df
 
 
