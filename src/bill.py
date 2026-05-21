@@ -423,7 +423,7 @@ def load_hourly_eec(utility: str, multiplier: float = 1.0) -> np.ndarray:
         col = EEC_TOTAL_COL.get(utility)
         if col is None:
             raise ValueError(f"unknown utility {utility!r}")
-        path = config.CR_ROOT / "eec_hourly_2025_wide.csv"
+        path = config.EEC_HOURLY_CSV
         df = pd.read_csv(path, usecols=[col])
         arr = df[col].values.astype(float)
         if arr.shape != (8760,):
