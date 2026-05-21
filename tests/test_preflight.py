@@ -63,11 +63,11 @@ def test_tou_periods_required_minimum():
 
 def test_project_run_plan_returns_lines():
     lines = pf.project_run_plan(["pge"])
-    assert any("Stage 0" in line for line in lines)
-    assert any("Stage 5" in line for line in lines)
-    # bundle row count should scale with rates x bundles x medoids
-    bundle_line = next(line for line in lines if "Stage 5" in line)
-    assert "row" in bundle_line.lower()
+    assert any("representative_buildings" in line for line in lines)
+    assert any("run_npv" in line for line in lines)
+    bundle_line = next(line for line in lines if "run_npv" in line)
+    # The run_npv plan line lists row/cell counts
+    assert any(w in bundle_line.lower() for w in ("row", "lp", "rows"))
 
 
 def test_run_all_checks_returns_list():

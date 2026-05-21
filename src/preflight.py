@@ -270,19 +270,12 @@ def check_output_dir() -> list[Check]:
 
 
 def check_existing_outputs(utilities: list[str]) -> list[Check]:
-    """Tell user which stages already have outputs (so they can decide
-    whether to re-run from scratch or pick up from a partial run)."""
+    """Report which EE outputs already exist (re-running will overwrite)."""
     out = config.DATA_DIR
     expected = [
-        ("stage 0", ["representative_buildings.parquet",
+        ("medoids", ["representative_buildings.parquet",
                      "population_excluded_summary.csv"]),
-        ("stage 1", [f"rate_scenarios_extended_{u}.csv" for u in utilities]),
-        ("stage 2", [f"sizing_results_{u}.parquet" for u in utilities]
-                   + [f"sizing_optimal_{u}.parquet" for u in utilities]),
-        ("stage 3", [f"ev_sensitivity_{u}.parquet" for u in utilities]),
-        ("stage 4", [f"upgrade11_economics_{u}.parquet" for u in utilities]),
-        ("stage 5", [f"bundle_economics_{u}.parquet" for u in utilities]
-                   + ["bundle_summary.csv"]),
+        ("npv_results", ["npv_results.parquet"]),
     ]
     checks = []
     for stage, files in expected:
@@ -293,8 +286,7 @@ def check_existing_outputs(utilities: list[str]) -> list[Check]:
             checks.append(Check(
                 f"{stage} outputs partial", WARN,
                 f"{len(present)}/{len(files)} present: "
-                + ", ".join(present[:3])
-                + ("..." if len(present) > 3 else "")))
+                + ", ".join(present[:3])))
         else:
             checks.append(Check(
                 f"{stage} outputs present", PASS,
@@ -307,8 +299,7 @@ def check_existing_outputs(utilities: list[str]) -> list[Check]:
 # -----------------------------------------------------------------------------
 
 def project_run_plan(utilities: list[str]) -> list[str]:
-    """Estimate row counts + rough runtime per stage. Read existing
-    artifacts where available; else fall back to scaled estimates."""
+    """Estimate row counts + rough runtime for the run_npv pipeline."""
     lines = []
     n_med = None
     rep = config.DATA_DIR / "representative_buildings.parquet"
@@ -317,23 +308,19 @@ def project_run_plan(utilities: list[str]) -> list[str]:
             n_med = len(pd.read_parquet(rep, columns=["bldg_id"]))
         except Exception:
             n_med = None
-    n_med_est = n_med or 3500   # post-shape-features target
-    n_rates_per_u = 8           # 6 canonical + 2 demand-charge variants
-    n_bundles = 8
+    n_med_est = n_med or 2541
+    n_scenarios = 40
+    # 4 non-PV bundles (none, ev, hp, ev_hp) x 1 cell each = 4 cells/medoid
+    # 4 PV bundles x 3 PV x 2 batt = 24 cells/medoid (each needs an LP solve)
+    # Total: 28 cells/medoid x 40 scenarios x 2 subsidy regimes
+    n_rows = n_med_est * 28 * n_scenarios * 2
+    n_lp = n_med_est * 24 * n_scenarios   # only PV-bundle cells need LP
 
     lines.append(f"Plan (utilities = {' '.join(utilities)}):")
-    lines.append(f"  Stage 0  representative_buildings   ~{n_med_est:,} medoid rows  (~2-3 min)")
-    lines.append(f"  Stage 1  rate_designer_extended      ~50 rate rows / utility       (~5 s)")
-    n_sizing = n_med_est * n_rates_per_u * 40   # ~40 pv x batt combos
-    lines.append(f"  Stage 2  sizing_optimizer            ~{n_sizing:,} cells, ~{n_med_est*n_rates_per_u:,} optima  (~3-5 min)")
-    n_ev = n_med_est * n_rates_per_u * 3 * 6 * 4 * 3
-    lines.append(f"  Stage 3  vmt_sensitivity             ~{n_ev:,} rows  (~5-10 min)")
-    lines.append(f"  Stage 4  upgrade11_economics         ~{n_med_est*n_rates_per_u:,} rows  (~1-2 min)")
-    n_bundle = n_med_est * n_rates_per_u * n_bundles
-    lines.append(f"  Stage 5  bundle_economics            ~{n_bundle:,} rows  (~5-10 min)")
-    if n_med is None:
-        lines.append("  (medoid count is the post-shape-features target; "
-                     "actual depends on regen)")
+    lines.append(f"  representative_buildings: {n_med_est:,} medoid rows")
+    lines.append(f"  run_npv:                  ~{n_rows:,} output rows")
+    lines.append(f"                            ~{n_lp:,} LP solves (~0.5s each)")
+    lines.append(f"                            estimated ~{n_lp * 0.5 / 3600:.1f} hr serial")
     return lines
 
 

@@ -320,6 +320,13 @@ NG_THERM_PRICE = {
     "default":   2.40,
 }
 
+# CARE customers receive a ~20% discount on residential natural gas
+# (PG&E gas CARE program, SoCalGas CARE, SDG&E gas CARE all roughly
+# 20% off the non-CARE bundled rate as of 2026). Applied to the
+# utility's $/therm above when household is_care=True. Source: PGE
+# CARE program guide, SoCalGas CARE schedules.
+GAS_CARE_DISCOUNT = 0.20
+
 # -----------------------------------------------------------------------------
 # EV / VEHICLE
 # -----------------------------------------------------------------------------
