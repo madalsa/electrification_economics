@@ -37,8 +37,10 @@ from src import config
 # =============================================================================
 
 # Months that count as "summer" for each utility's residential tariff.
-# Matches the user's baseline-bills code: months 6-10 (Jun-Oct).
-SUMMER_MONTHS_BY_UTILITY = {"pge": (6, 10), "sce": (6, 10), "sdge": (6, 10)}
+# Source: parent <utility>_config.py build_time_arrays().
+#   PGE / SCE: summer = Jun-Sep (months 6-9)   per E-TOU-C / TOU-D-4-9
+#   SDGE:      summer = Jun-Oct (months 6-10)  per TOU-DR
+SUMMER_MONTHS_BY_UTILITY = {"pge": (6, 9), "sce": (6, 9), "sdge": (6, 10)}
 
 # Reference actual-tariff row in the retail Excel — used to pull
 # baseline_credit_rate and care_discount that apply uniformly across
@@ -66,10 +68,14 @@ def time_arrays() -> dict:
 def build_period_masks(utility: str) -> dict[str, np.ndarray]:
     """Per-utility TOU period boolean masks (each 8760-array).
 
-    PGE:  4 periods - summer 6-10 / peak 16-21 / no midpeak
-    SCE:  5 periods - summer 6-10 / peak 16-21 / winter midpeak 8-16
-          (matches TOU-D-4-9 tariff; verify vs sce_config.build_sce_period_masks)
-    SDGE: 6 periods - summer 6-10 / peak 16-21 / midpeak (6-16) OR (21-22)
+    Matches user's parent <utility>_config.build_*_period_masks
+    line-by-line:
+      PGE  (4 periods, E-TOU-C):     summer Jun-Sep / peak 16-21
+      SCE  (5 periods, TOU-D-4-9):   summer Jun-Sep / peak 16-21 /
+                                      winter midpeak 21-24 OR 0-8
+                                      (overnight); winter offpeak is 8-16
+      SDGE (6 periods, TOU-DR):      summer Jun-Oct / peak 16-21 /
+                                      midpeak (6-16) OR (21-22)
     """
     ta = time_arrays()
     months, hod = ta["months"], ta["hour_of_day"]
@@ -83,7 +89,9 @@ def build_period_masks(utility: str) -> dict[str, np.ndarray]:
                 "winter_peak": ~is_summer & is_peak,
                 "winter_offpeak": ~is_summer & ~is_peak}
     if utility == "sce":
-        wmid = (hod >= 8) & (hod < 16)
+        # Winter midpeak = overnight (9pm-8am), NOT daytime.
+        # Winter offpeak = 8am-4pm (the daytime window).
+        wmid = (hod >= 21) | (hod < 8)
         return {"summer_peak": is_summer & is_peak,
                 "summer_offpeak": is_summer & ~is_peak,
                 "winter_peak": ~is_summer & is_peak,

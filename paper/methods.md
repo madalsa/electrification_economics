@@ -49,14 +49,14 @@ total_bill    = vol_bill + fixed_annual - export_credit
   - Electricity: tier-specific `Fixed_CARE` from rate sheet + utility-specific volumetric discount applied to `vol_bill`.
   - Gas: 20% discount on $/therm (`config.GAS_CARE_DISCOUNT`).
 
-## Per-utility TOU period definitions
+## Per-utility TOU period definitions (matched to parent `<utility>_config.py`)
 | Utility | Summer | Peak | Midpeak | Periods |
 |---|---|---|---|---|
-| PGE | months 6-10 | hours 16-21 | none | 4 |
-| SCE | months 6-10 | hours 16-21 | winter only, hours 8-16 | 5 |
-| SDGE | months 6-10 | hours 16-21 | hours 6-16 OR 21-22 (both seasons) | 6 |
+| PGE  | Jun-Sep | 16-21 | none | 4 |
+| SCE  | Jun-Sep | 16-21 | winter only, 21-08 (overnight) | 5 |
+| SDGE | Jun-Oct | 16-21 | 06-16 OR 21-22 (both seasons) | 6 |
 
-*SCE period mask is best guess matching TOU-D-4-9 tariff; verify against parent `sce_config.build_sce_period_masks`.*
+A regression test (`tests/test_bill.py::test_period_masks_match_parent_config_if_present`) verifies our masks exactly equal those from `<utility>_config.build_*_period_masks` when the parent config modules are present.
 
 ## Subsidy regimes
 Two regimes are computed for every cell, in parallel:

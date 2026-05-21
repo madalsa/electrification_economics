@@ -39,6 +39,63 @@ def test_5pm_in_july_is_summer_peak_all_utilities():
         assert bill.build_period_masks(u)["summer_peak"][h]
 
 
+def test_pge_sce_summer_is_jun_sep_not_jun_oct():
+    """User's *_config.py defines PGE and SCE summer as Jun-Sep (6-9).
+    SDGE is Jun-Oct (6-10). October hours must be WINTER for PGE/SCE."""
+    h_oct = 273 * 24 + 12  # Oct 1 at noon — day 274 of year
+    assert bill.build_period_masks("pge")["winter_offpeak"][h_oct]
+    masks_sce = bill.build_period_masks("sce")
+    # Oct 1 at noon: in SCE winter, hod=12 is daytime -> winter offpeak
+    # (NOT winter midpeak, because mp = overnight 21-8).
+    assert masks_sce["winter_offpeak"][h_oct]
+    assert bill.build_period_masks("sdge")["summer_midpeak"][h_oct]
+
+
+def test_sce_winter_midpeak_is_overnight_not_daytime():
+    """SCE winter midpeak = 9pm-8am (overnight); winter offpeak = 8am-4pm.
+    Regression on the previous bug where these were swapped.
+    Pick a January hour (h=24+10) — Jan 2 at 10am should be winter
+    offpeak (daytime), NOT winter midpeak."""
+    h_jan_morning = 24 + 10  # Jan 2 at 10am
+    masks = bill.build_period_masks("sce")
+    assert masks["winter_offpeak"][h_jan_morning]
+    assert not masks["winter_midpeak"][h_jan_morning]
+
+    # Jan 2 at 3am should be winter midpeak (overnight)
+    h_jan_overnight = 24 + 3
+    assert masks["winter_midpeak"][h_jan_overnight]
+    assert not masks["winter_offpeak"][h_jan_overnight]
+
+
+def test_period_masks_match_parent_config_if_present():
+    """Parity check: if user's <utility>_config.build_*_period_masks is
+    importable, our masks must match it exactly. This is the regression
+    test for the SCE midpeak / summer-month bugs we caught.
+    """
+    import importlib
+    import sys as _sys
+    # Make sure parent config modules at the repo root are importable
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in _sys.path:
+        _sys.path.insert(0, str(repo_root))
+    for u, mask_fn_name in (
+        ("pge",  "build_pge_period_masks"),
+        ("sce",  "build_sce_period_masks"),
+        ("sdge", "build_sdge_period_masks"),
+    ):
+        try:
+            mod = importlib.import_module(f"{u}_config")
+        except ImportError:
+            continue   # parent config not in this env; skip
+        parent_masks = getattr(mod, mask_fn_name)()
+        ours = bill.build_period_masks(u)
+        assert set(parent_masks) == set(ours), \
+            f"{u}: period names differ"
+        for period, parent_mask in parent_masks.items():
+            assert np.array_equal(parent_mask, ours[period]), \
+                f"{u}.{period}: masks differ"
+
+
 # ---- EV hourly load ----
 
 def test_ev_hourly_sums_to_annual():

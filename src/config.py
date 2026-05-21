@@ -15,11 +15,17 @@ EE_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = EE_ROOT / "data"
 
 # Parent pipeline inputs (rate sheets, TOU weights, EEC hourly, metadata
-# parquets, etc.) Default: EE_ROOT itself (standalone layout where the
-# rate sheets sit alongside the EE folder). Override via env var
-# EE_PARENT_DIR when EE is embedded inside the california_rates repo
-# (historical layout, where parent files live one directory up).
+# parquets, PUMA mapping). Default: EE_ROOT itself (standalone layout
+# where these CSVs/Excels sit alongside the EE folder). Override via
+# env var EE_PARENT_DIR when EE is embedded inside the california_rates
+# repo (historical layout, where parent files live one directory up).
 CR_ROOT = Path(os.environ.get("EE_PARENT_DIR", str(EE_ROOT)))
+
+# Hourly parquet directories (Baseline_<U>/ and Upgrade11_<U>/) may live
+# on slow / remote storage (e.g., a Google Drive mount via rclone) while
+# the in-repo CSVs stay local. Override EE_PARQUET_DIR independently of
+# EE_PARENT_DIR to point at the mounted location.
+PARQUET_ROOT = Path(os.environ.get("EE_PARQUET_DIR", str(CR_ROOT)))
 
 PIPELINE_OUTPUTS = {
     "pge": {
@@ -28,8 +34,8 @@ PIPELINE_OUTPUTS = {
         "summary":        CR_ROOT / "pipeline_summary_pge.csv",
         "rate_scenarios": CR_ROOT / "rate_scenarios_pge.csv",
         "tou_weights":    CR_ROOT / "tou_weights_pge.csv",
-        "baseline_parquets": CR_ROOT / "Baseline_PGE",
-        "upgrade11_parquets": CR_ROOT / "Upgrade11_PGE",
+        "baseline_parquets": PARQUET_ROOT / "Baseline_PGE",
+        "upgrade11_parquets": PARQUET_ROOT / "Upgrade11_PGE",
     },
     "sce": {
         "baseline_bills": CR_ROOT / "baseline_bills_sce_fresh.csv",
@@ -37,8 +43,8 @@ PIPELINE_OUTPUTS = {
         "summary":        CR_ROOT / "pipeline_summary_sce.csv",
         "rate_scenarios": CR_ROOT / "rate_scenarios_sce.csv",
         "tou_weights":    CR_ROOT / "tou_weights_sce.csv",
-        "baseline_parquets": CR_ROOT / "Baseline_SCE",
-        "upgrade11_parquets": CR_ROOT / "Upgrade11_SCE",
+        "baseline_parquets": PARQUET_ROOT / "Baseline_SCE",
+        "upgrade11_parquets": PARQUET_ROOT / "Upgrade11_SCE",
     },
     "sdge": {
         "baseline_bills": CR_ROOT / "baseline_bills_sdge_fresh.csv",
@@ -46,8 +52,8 @@ PIPELINE_OUTPUTS = {
         "summary":        CR_ROOT / "pipeline_summary_sdge.csv",
         "rate_scenarios": CR_ROOT / "rate_scenarios_sdge.csv",
         "tou_weights":    CR_ROOT / "tou_weights_sdge.csv",
-        "baseline_parquets": CR_ROOT / "Baseline_SDGE",
-        "upgrade11_parquets": CR_ROOT / "Upgrade11_SDGE",
+        "baseline_parquets": PARQUET_ROOT / "Baseline_SDGE",
+        "upgrade11_parquets": PARQUET_ROOT / "Upgrade11_SDGE",
     },
 }
 
