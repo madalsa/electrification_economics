@@ -1,4 +1,4 @@
-"""Preflight: validate prerequisites before running run_economics.
+"""Preflight: validate prerequisites before running run_npv.
 
 Catches the failure modes that otherwise show up mid-run:
   - Parent california_rates files missing / renamed
@@ -15,7 +15,7 @@ Outputs a structured report: PASS / WARN / FAIL per check, plus a
 "run plan" showing expected row counts and rough runtime per stage.
 Exits with non-zero status if any FAIL.
 
-Run BEFORE `python -m electrification_economics.src.run_economics`.
+Run BEFORE `python -m src.run_npv`.
 
 CLI:
     python -m electrification_economics.src.preflight \
@@ -226,23 +226,28 @@ def check_eec_hourly(utilities: list[str]) -> list[Check]:
         df = pd.read_csv(path)
     except Exception as exc:
         return [Check("EEC hourly", FAIL, f"unreadable: {exc}")]
-    required_cols = {"datetime", "utility", "eec_total"}
-    if not required_cols.issubset(df.columns):
+    # Wide-format schema: datetime + one *_total column per utility
+    # (pge_total / sce_total / sdge_total). bill.load_hourly_eec
+    # reads these directly.
+    required_cols = {"datetime"} | {f"{u}_total" for u in utilities}
+    missing = required_cols - set(df.columns)
+    if missing:
         return [Check("EEC hourly", FAIL,
-                      f"missing columns: {required_cols - set(df.columns)}")]
+                      f"missing columns: {missing}")]
+    if len(df) != 8760:
+        return [Check("EEC hourly", WARN,
+                      f"{len(df)} rows (expected 8760)")]
     checks = [Check("EEC hourly", PASS,
-                    f"{len(df):,} rows total")]
-    utes = df["utility"].str.lower()
+                    f"{len(df):,} rows; per-utility _total columns present")]
     for u in utilities:
-        n = (utes == u).sum()
-        if n == 0:
-            checks.append(Check(f"  EEC rows for {u}", FAIL, "no rows"))
-        elif abs(n - 8760) > 24:
-            checks.append(Check(f"  EEC rows for {u}", WARN,
-                                f"{n} rows (expected ~8760)"))
+        col = f"{u}_total"
+        avg = df[col].mean()
+        if not (0.0 < avg < 1.0):
+            checks.append(Check(f"  {col}", WARN,
+                                f"avg=${avg:.4f}/kWh outside expected range"))
         else:
-            checks.append(Check(f"  EEC rows for {u}", PASS,
-                                f"{n} rows"))
+            checks.append(Check(f"  {col}", PASS,
+                                f"avg=${avg:.4f}/kWh"))
     return checks
 
 
@@ -343,7 +348,7 @@ def run_all_checks(utilities: list[str]) -> list[Check]:
 def main():
     ap = argparse.ArgumentParser(
         description="Validate prerequisites + show run plan for the "
-                    "EE pipeline. Run BEFORE run_economics.py.")
+                    "EE pipeline. Run BEFORE run_npv.py.")
     ap.add_argument("--utilities", nargs="+",
                     default=list(config.INCLUDED_UTILITIES))
     ap.add_argument("--strict", action="store_true",
@@ -375,8 +380,8 @@ def main():
         sys.exit(1)
     print()
     print("Preflight OK. Safe to run:")
-    print("  python -m electrification_economics.src.run_economics --test")
-    print("  (then drop --test for the full run)")
+    print("  python -m src.run_npv --limit 20      # smoke test")
+    print("  python -m src.run_npv                  # full run")
 
 
 if __name__ == "__main__":
