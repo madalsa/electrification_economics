@@ -215,8 +215,12 @@ def test_bill_care_discount_applied():
     assert math.isclose(low, 876.0 * 0.65, abs_tol=0.1)
 
 
-def test_bill_export_credit_with_eec():
-    """3 kWh export at noon, $0.08 EEC -> $0.24 credit (negative bill)."""
+def test_bill_export_credit_with_eec_clamped_at_zero():
+    """3 kWh export at noon, $0.08 EEC -> $0.24 export credit.
+    With no imports, vol_bill = 0 and export credit would push the
+    volumetric portion to -$0.24. Per NBT billing convention, the
+    volumetric leg is clamped at 0 — utility doesn't pay net-negative.
+    Fixed charges (zero here) still add on top."""
     load = np.zeros(8760)
     load[12] = -3.0
     scenario = pd.Series({
@@ -229,7 +233,33 @@ def test_bill_export_credit_with_eec():
     bill_amount = bill.compute_annual_bill(
         load, scenario, "Medium", "G06000101", "pge",
         eec_hourly=eec, retail_data=rd)
-    assert math.isclose(bill_amount, -0.24, abs_tol=1e-9)
+    # max(0 - 0.24, 0) + 0 = 0
+    assert math.isclose(bill_amount, 0.0, abs_tol=1e-9)
+
+
+def test_bill_export_credit_partial_offset():
+    """Imports $1.00 at peak + exports $0.30 export-credit.
+    Vol-bill leg = max(1.00 - 0.30, 0) = $0.70. Plus fixed."""
+    load = np.zeros(8760)
+    load[17] = 5.0    # July noon-ish: actually hr 17 = winter peak
+    # Use a peak hour in summer to land at summer_peak rate
+    load = np.zeros(8760)
+    load[181 * 24 + 17] = 5.0   # July 1 at 5pm -> summer_peak
+    load[12] = -3.0             # Jan 1 noon -> winter offpeak (export hr)
+    scenario = pd.Series({
+        "summer_peak": 0.20, "summer_offpeak": 0.10,
+        "winter_peak": 0.15, "winter_offpeak": 0.10,
+        "fixed_monthly_care": 0.0, "fixed_monthly_non_care": 0.0,
+    })
+    eec = np.ones(8760) * 0.10
+    rd = _synthetic_retail()
+    b = bill.compute_annual_bill(
+        load, scenario, "Medium", "G06000101", "pge",
+        eec_hourly=eec, retail_data=rd)
+    # imports: 5 kWh * $0.20 summer_peak = $1.00
+    # exports: 3 kWh * $0.10 = $0.30 credit
+    # vol leg: max(1.00 - 0.30, 0) = $0.70
+    assert math.isclose(b, 0.70, abs_tol=1e-9)
 
 
 def test_bill_no_eec_means_no_export_credit():

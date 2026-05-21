@@ -454,9 +454,9 @@ def compute_annual_bill(
         grid_out  = max(-net_load, 0)
         vol_bill  = sum(grid_in * hourly_rate) - baseline_credit(grid_in)
         if is_care: vol_bill *= (1 - care_discount)
-        export_credit = sum(grid_out * eec_hourly)        # if EEC given
-        fixed_annual = (Fixed_CARE if is_care else Fixed_NonCARE) * 12
-        total = vol_bill + fixed_annual - export_credit
+        export_credit = sum(grid_out * eec_hourly)            # if EEC given
+        fixed_annual  = (Fixed_CARE if is_care else Fixed_NonCARE) * 12
+        total = max(vol_bill - export_credit, 0) + fixed_annual
 
     income_category: 'Low' (CARE) / 'Medium' / 'High'.
     eec_hourly: optional 8760-array for export compensation; pass None
@@ -490,4 +490,9 @@ def compute_annual_bill(
     export_credit = (float(np.dot(grid_out, eec_hourly))
                      if eec_hourly is not None else 0.0)
 
-    return vol_bill + fixed_annual - export_credit
+    # Clamp (vol_bill - export_credit) at 0 per NBT billing convention:
+    # surplus export credits don't reduce the volumetric bill below zero
+    # (no Net Surplus Compensation modeled here, conservative for very
+    # over-sized PV which is excluded by the 1×/1.15×/1.25× sizing grid).
+    # Matches the user's *_post_adoption.py methodology.
+    return max(vol_bill - export_credit, 0.0) + fixed_annual

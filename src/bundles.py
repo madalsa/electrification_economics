@@ -89,11 +89,15 @@ def bundle_net_capex(
 def pv_sizing_grid(annual_load_kwh: float) -> list[float]:
     """PV sizes in kW for a household with given annual load.
 
-    User specified: 1x, 1.5x, 3x annual load. Sized so PV annual yield
-    (CA ~1700 kWh/kW/yr) equals the multiplier x annual load.
+    Three sizes within NBT interconnection eligibility (≤125% of
+    historical load for residential):
+      1.00× — sized to expanded annual load
+      1.15× — modestly over-sized (still within NBT cap)
+      1.25× — at the NBT interconnection cap
+    CA solar yield ~1700 kWh/kW/yr is used to convert load → kW.
     """
     base_pv_kw = annual_load_kwh / 1700.0
-    return [base_pv_kw, 1.5 * base_pv_kw, 3.0 * base_pv_kw]
+    return [base_pv_kw, 1.15 * base_pv_kw, 1.25 * base_pv_kw]
 
 
 # Battery sizing grid: 1 or 2 Tesla Powerwall 3 (13.5 kWh each).

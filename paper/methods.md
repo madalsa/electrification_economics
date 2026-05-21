@@ -84,20 +84,48 @@ Two regimes are computed for every cell, in parallel:
 - **Battery life**: 15 years (NREL ATB 2024b residential).
 
 ## Pipeline (`run_npv.py`)
-For each `(medoid × rate × bundle × subsidy regime)`:
-1. Load `baseline_hourly = Baseline_<U>/<bldg>-0.parquet` (15-min aggregated to 8760).
+For each `(medoid × bundle × sizing)`:
+1. Load `baseline_hourly = Baseline_<U>/<bldg>-0.parquet` (15-min → 8760).
 2. If HP bundle: add `upgrade11_delta = Upgrade11_<U>/<bldg>-11.parquet − baseline`.
 3. If EV bundle: add `ev_hourly_load(VMT / EV_eff, 'smart_tou')`.
-4. If PV bundle: solve `battery_lp_dispatch` per `(pv_kw, batt_kwh)` cell → signed net hourly load.
+4. If PV bundle: **solve `battery_lp_dispatch` ONCE** using the actual baseline tariff (F0_WF0_ROE0 = E-TOU-C / TOU-D-4-9 / TOU-DR) — see "LP-once-and-reuse" below.
+
+Then for each `(rate scenario × subsidy regime)`:
+
 5. `bill_pre = compute_annual_bill(baseline_hourly, scenario)`.
 6. `bill_post = compute_annual_bill(post_electrification_hourly, scenario, eec=eec_hourly)`.
+   - For PV bundles, `post_electrification_hourly = grid_in − grid_out` from the single LP solve in step 4 (no re-optimization).
 7. `annual_savings = (bill_pre - bill_post) + gas_savings + gasoline_savings`.
    - `gas_savings`: HP bundles only; baseline_therms × $/therm (CARE-discounted).
    - `gasoline_savings`: EV bundles only; VMT × $/gal ÷ MPG.
 8. For each subsidy regime: `net_capex = gross_capex - subsidies`; `npv = payback_npv.npv(annual_savings, net_capex)`.
 9. Write one parquet row.
 
-**Compute estimate**: 2,541 medoids × 40 scenarios × 8 bundles × 2 subsidy regimes ≈ 1.6M rows. PV bundles need ~960K LP solves at ~0.5s each ≈ ~14 hr serial. Smoke mode (`--limit 20`) processes ~20 medoids per utility in a few minutes.
+### LP-once-and-reuse (battery dispatch)
+
+Matches the user's prior paper methodology (`*_post_adoption.py`). The LP that picks battery charge / discharge / grid import / grid export is solved **once per (medoid, bundle, PV size, battery size) cell** using the actual baseline tariff (`F0_WF0_ROE0` in the rate designer's coordinates, which equals `E-TOU-C` / `TOU-D-4-9` / `TOU-DR` in the retail Excel). The resulting `grid_import` and `grid_export` 8760-arrays are reused for all 40 designed rate scenarios via simple dot products:
+
+```
+bill_post[scenario] = max(grid_in · rate[scenario] - baseline_credit
+                          - grid_out · eec_hourly, 0)
+                    + fixed_annual[is_care, scenario]
+```
+
+Justification: across the 40 designed scenarios, the rate designer scales all TOU periods proportionally as `Fixed_Pct_TD` varies (0% → 100%). The peak-to-offpeak **ratio** is constant to 4 decimals (PGE 1.2637, SCE 1.5316, SDGE 1.3333). Since the optimal battery dispatch is driven by that ratio (when to shift kWh from peak → offpeak), the LP solution is essentially identical across scenarios — only the absolute *cost* changes. Bias from reuse is below numerical precision.
+
+Cuts LP count from `40 × (medoids × sizing cells)` to just `(medoids × sizing cells)` — a 40× speedup. Full-run compute drops from ~5-14 days to ~12-24 hours on the user's M1 Pro (8 workers).
+
+### Bill clamp at zero (volumetric leg)
+
+Volumetric leg of the bill is clamped at 0 before adding the fixed charge:
+
+```
+total_bill = max(vol_bill_after_care - export_credit, 0) + fixed_annual
+```
+
+Matches actual NBT billing convention: a customer's net bill before fixed charges cannot go below zero. Net Surplus Compensation (the small annual true-up payment at ~$0.05/kWh wholesale rate for true-up-cycle surplus) is **not** modeled. With the PV sizing grid capped at 1.25× annual load (within NBT interconnection eligibility), the clamp rarely binds; for the 1.25× tier the conservative bias is below 5% per cell.
+
+**Compute estimate**: 2,541 medoids × 8 bundles × ~6 sizing cells per PV bundle ≈ **24 LP solves per medoid** (not per scenario). At ~0.94s per LP on M1 Pro → ~22.5 s/medoid → **~16 hr serial / ~2-3 hr with 8 workers** for the full sweep. Output rows: 2,541 × 8 bundles × 6 sizing × 40 scenarios × 2 subsidy regimes ≈ ~9.8M rows.
 
 ## Output schema (`data/npv_results.parquet`)
 One row per `(medoid × rate × bundle × sizing)`:

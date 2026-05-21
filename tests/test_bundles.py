@@ -67,13 +67,18 @@ def test_2024_capex_lower_than_2026():
     assert net_2024 < net_2026
 
 
-def test_pv_sizing_grid_three_sizes():
+def test_pv_sizing_grid_three_sizes_within_nbt_cap():
+    """PV sizes: 1.00× / 1.15× / 1.25× of expanded annual load.
+    All three are within the residential NBT interconnection eligibility
+    (≤125% of historical load); the previous 3× tier is dropped because
+    it's not interconnection-eligible for residential under NBT."""
     sizes = bundles.pv_sizing_grid(annual_load_kwh=10000)
     assert len(sizes) == 3
-    # 1x annual load at ~1700 kWh/kW/yr -> ~5.88 kW
     assert math.isclose(sizes[0], 10000 / 1700, rel_tol=1e-6)
-    assert math.isclose(sizes[1], 1.5 * sizes[0])
-    assert math.isclose(sizes[2], 3.0 * sizes[0])
+    assert math.isclose(sizes[1], 1.15 * sizes[0])
+    assert math.isclose(sizes[2], 1.25 * sizes[0])
+    # Largest tier still within NBT cap
+    assert sizes[2] <= 1.25 * sizes[0]
 
 
 def test_battery_sizing_grid_two_powerwalls():
