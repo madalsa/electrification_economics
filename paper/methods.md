@@ -58,16 +58,27 @@ total_bill    = vol_bill + fixed_annual - export_credit
 
 A regression test (`tests/test_bill.py::test_period_masks_match_parent_config_if_present`) verifies our masks exactly equal those from `<utility>_config.build_*_period_masks` when the parent config modules are present.
 
-## Subsidy regimes
-Two regimes are computed for every cell, in parallel:
-- **`2026_base`** (post-OBBB, default):
-  - Federal: 25C / 25D / 30D = 0 (OBBB repeal, effective 1/1/2026 / 9/30/2025 for EV).
-  - CA: TECH, SGIP, SGIP-HPWH, HOMES, Golden State, RENs, CC4A by air district, DCAP (≤300% FPL).
-- **`2024_counterfactual`** (pre-OBBB):
-  - Restores 30% PV/battery ITC, $2K 25C HP/HPWH, $600 panel, $7,500 30D EV, 30% 30C EVSE.
-  - CA programs unchanged.
+## Subsidy regimes (`src/subsidies.py`)
+All capex-subsidy assumptions live in one file (`src/subsidies.py`) as a `SubsidySchedule` table. **Three regimes** computed in parallel for every cell:
 
-**The 2026-vs-2024 NPV gap per cell** is the central paper question: how much can rate design recover what OBBB took away?
+- **`2024_federal`** — pre-OBBB federal stack only (Sections 25C/25D/30D restored). No CA state programs.
+  - PV 30% ITC, battery 30% ITC, 25C HP $2K, 25C HPWH $2K, 25C panel $600, 30D EV $7,500.
+- **`2026_federal`** — post-OBBB federal stack only ($0 across the board). No CA state programs.
+- **`2026_ca_added`** — `2026_federal` + CA state programs (optional overlay).
+  - SGIP battery $200/kWh general (cap 30 kWh) / $850/kWh CARE.
+  - State HP space: $5K Non-CARE / $11K CARE (aggregates TECH + HOMES).
+  - State HPWH: $7K Non-CARE / $10K CARE (aggregates TECH + SGIP + Golden State).
+  - State induction: $840 CARE only.
+  - State EV: $7,500 CARE only (DCAP statewide; CC4A varies by district and is not modeled separately).
+
+**Tier granularity is CARE vs Non-CARE only.** No AMI sub-tiers, no DAC, no air-district detail. CARE = `income_category == 'Low'` (`in.income` < $50K).
+
+**Two clean analytical questions**:
+- **Headline OBBB gap** = `npv_2024_federal − npv_2026_federal`. What did losing the federal stack cost households?
+- **CA recovery** = `npv_2026_ca_added − npv_2026_federal`. What do CA state programs alone recover?
+- **Rate-design recovery** is orthogonal: spread of `npv_2026_federal` across the 40 rate scenarios. What can CPUC do without changing capex subsidies at all?
+
+Programs that EXIST in CA (e.g., per-district CC4A nuances, BayREN/3C-REN add-ons, DAC bonuses, HEAR, individual federal 25C/25D itemization) are aggregated into the table above rather than modeled separately. This is a deliberate simplification: maintenance burden is lower, the headline answers are unaffected, and the equity story is preserved at CARE/Non-CARE granularity.
 
 ## Fuel prices
 - **Natural gas** (residential bundled non-CARE, Jan 2026; $/therm): PGE 2.92, SoCalGas (used for SCE) 2.08, SDGE 2.10. CARE customers: × (1 - 0.20).
@@ -139,8 +150,8 @@ One row per `(medoid × rate × bundle × sizing)`:
 | Bills | bill_pre, bill_post, electric_savings |
 | Non-electric | gas_savings, gasoline_savings, annual_therms |
 | Total | annual_savings |
-| Capex | net_capex_2026_base, net_capex_2024_counterfactual |
-| **NPV** | **npv_2026_base, npv_2024_counterfactual** |
+| Capex | net_capex_2024_federal, net_capex_2026_federal, net_capex_2026_ca_added |
+| **NPV** | **npv_2024_federal, npv_2026_federal, npv_2026_ca_added** |
 
 ## Parent inputs (must be present)
 - `CA_baseline_tmy_metadata_and_annual_results.parquet` — building metadata + annual results.

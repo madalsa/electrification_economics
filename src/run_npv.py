@@ -38,11 +38,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src import bill, bundles, config, payback_npv as p
 
 
-# Map air districts to utilities for CC4A eligibility lookup
-AIR_DISTRICT_BY_UTILITY = {"pge": "BAAQMD", "sce": "SCAQMD",
-                            "sdge": "SDAPCD"}
-
-
 # -----------------------------------------------------------------------------
 # Rate-scenario loaders
 # -----------------------------------------------------------------------------
@@ -210,20 +205,18 @@ def evaluate_medoid_bundle(
         electric_savings = bill_pre - bill_post
         annual_savings = electric_savings + gas_save + gasoline_save
 
-        # Net capex + NPV under each subsidy regime
+        # Net capex + NPV under each subsidy regime (tier=CARE/Non-CARE only)
         npv_results = {}
+        cashflows = p.annual_cashflow_series(
+            annual_savings,
+            midlife_replacement_year=(
+                config.INVERTER_REPLACEMENT_YEAR if pv_kw > 0 else None),
+            midlife_replacement_cost=(
+                config.INVERTER_REPLACEMENT_COST if pv_kw > 0 else 0))
         for regime in bundles.SUBSIDY_REGIMES:
             net_capex, _ = bundles.bundle_net_capex(
-                bundle, pv_kw, batt_kwh, income, regime,
-                air_district=AIR_DISTRICT_BY_UTILITY.get(utility))
-            cashflows = p.annual_cashflow_series(
-                annual_savings,
-                midlife_replacement_year=(
-                    config.INVERTER_REPLACEMENT_YEAR if pv_kw > 0 else None),
-                midlife_replacement_cost=(
-                    config.INVERTER_REPLACEMENT_COST if pv_kw > 0 else 0))
-            npv_value = p.npv(cashflows, capex=net_capex)
-            npv_results[f"npv_{regime}"] = npv_value
+                bundle, pv_kw, batt_kwh, is_care, regime)
+            npv_results[f"npv_{regime}"] = p.npv(cashflows, capex=net_capex)
             npv_results[f"net_capex_{regime}"] = net_capex
 
         rows.append({
